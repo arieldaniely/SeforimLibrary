@@ -27,17 +27,17 @@ Cross-platform artifacts (on matching OS):
 ./gradlew :bookimporter:packageReleaseDistribution
 ```
 
-Windows EXE (run on Windows with `jpackage`):
+Windows portable ZIP (run on Windows):
 
 ```bash
-./gradlew :bookimporter:packageWindowsExe
+./gradlew :bookimporter:packageWindowsPortable
 # or from root
-./gradlew packageBookImporterWindowsExe
+./gradlew packageBookImporterWindowsPortable
 ```
 
-## User install (Windows)
+## User run (Windows portable)
 
-1. Download the generated EXE from `generator/bookimporter/build/compose/binaries/main-release/exe/`.
-2. Run installer.
-3. Open **Seforim DB Book Importer**.
+1. Download the generated ZIP from `generator/bookimporter/build/compose/binaries/main-release/portable/`.
+2. Extract the ZIP to any folder.
+3. Open **SeforimBookImporter.exe** from the extracted folder.
 4. Select DB + book folder(s), run **Scan + Preview**, then **Execute Import**.

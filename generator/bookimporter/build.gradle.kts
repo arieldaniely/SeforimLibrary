@@ -45,3 +45,13 @@ tasks.register("packageWindowsExe") {
     description = "Build a Windows EXE installer for the desktop importer (run on Windows with jpackage available)."
     dependsOn("packageReleaseExe")
 }
+
+tasks.register<Zip>("packageWindowsPortable") {
+    group = "distribution"
+    description = "Build a portable Windows package (no installer) for the desktop importer."
+    dependsOn("createReleaseDistributable")
+
+    from(layout.buildDirectory.dir("compose/binaries/main-release/app/SeforimBookImporter"))
+    archiveFileName.set("SeforimBookImporter-windows-portable.zip")
+    destinationDirectory.set(layout.buildDirectory.dir("compose/binaries/main-release/portable"))
+}

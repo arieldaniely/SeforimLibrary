@@ -1,4 +1,4 @@
-name: Build Book Importer EXE
+name: Build Book Importer Portable
 
 on:
   push:
@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  build-windows-exe:
-    name: Build Windows EXE installer
+  build-windows-portable:
+    name: Build Windows portable package
     runs-on: windows-latest
 
     steps:
@@ -30,15 +30,14 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build Book Importer EXE
-        run: .\gradlew.bat packageBookImporterWindowsExe --no-daemon --stacktrace
+      - name: Build Book Importer Portable
+        run: .\gradlew.bat packageBookImporterWindowsPortable --no-daemon --stacktrace
 
-      - name: Upload EXE artifacts
+      - name: Upload portable artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: seforim-book-importer-exe
+          name: seforim-book-importer-portable
           path: |
-            generator/bookimporter/build/compose/binaries/main-release/exe/*.exe
-            generator/bookimporter/build/compose/binaries/main-release/exe/**/*.exe
+            generator/bookimporter/build/compose/binaries/main-release/portable/*.zip
           if-no-files-found: error
           retention-days: 14
