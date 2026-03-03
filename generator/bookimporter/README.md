@@ -1,6 +1,6 @@
-# Seforim Book Importer (Desktop GUI)
+# Seforim Book Importer (Portable Desktop GUI)
 
-Desktop tool (Compose for Desktop, JVM) for appending new books into an existing `seforim.db`.
+Portable desktop tool (Compose for Desktop, JVM) for appending new books into an existing `seforim.db`.
 
 ## Features
 
@@ -21,23 +21,22 @@ Desktop tool (Compose for Desktop, JVM) for appending new books into an existing
 
 ## Build distributables
 
-Cross-platform artifacts (on matching OS):
+Portable bundle (no installer):
 
 ```bash
-./gradlew :bookimporter:packageReleaseDistribution
-```
-
-Windows EXE (run on Windows with `jpackage`):
-
-```bash
-./gradlew :bookimporter:packageWindowsExe
+./gradlew :bookimporter:packagePortable
 # or from root
-./gradlew packageBookImporterWindowsExe
+./gradlew packageBookImporterPortable
 ```
 
-## User install (Windows)
+## User usage (portable)
 
-1. Download the generated EXE from `generator/bookimporter/build/compose/binaries/main-release/exe/`.
-2. Run installer.
-3. Open **Seforim DB Book Importer**.
+1. Build or copy the generated ZIP from `generator/bookimporter/build/compose/binaries/main-release/portable/` (or use the app folder in `.../app/`).
+2. Extract and move the folder anywhere you want (USB, shared drive, etc.).
+3. Run the launcher inside that folder.
 4. Select DB + book folder(s), run **Scan + Preview**, then **Execute Import**.
+
+
+### Legacy command compatibility
+
+`packageBookImporterWindowsExe` and `:bookimporter:packageWindowsExe` are kept as compatibility aliases and now build the portable bundle.

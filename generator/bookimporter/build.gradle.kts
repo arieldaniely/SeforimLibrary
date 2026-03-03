@@ -31,17 +31,29 @@ compose.desktop {
             packageVersion = "1.0.0"
             description = "GUI tool for appending seforim into an existing SeforimLibrary SQLite DB"
             vendor = "SeforimLibrary"
-            targetFormats(
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe,
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb
-            )
         }
     }
 }
 
+tasks.register("packagePortableBundle", org.gradle.api.tasks.bundling.Zip::class) {
+    group = "distribution"
+    description = "Create a portable ZIP bundle for the desktop importer (no installer)."
+    dependsOn("createReleaseDistributable")
+
+    from(layout.buildDirectory.dir("compose/binaries/main-release/app"))
+    archiveBaseName.set("SeforimBookImporter")
+    archiveClassifier.set("portable")
+    destinationDirectory.set(layout.buildDirectory.dir("compose/binaries/main-release/portable"))
+}
+
+tasks.register("packagePortable") {
+    group = "distribution"
+    description = "Build the portable desktop importer bundle (folder + ZIP, no installer)."
+    dependsOn("packagePortableBundle")
+}
+
 tasks.register("packageWindowsExe") {
     group = "distribution"
-    description = "Build a Windows EXE installer for the desktop importer (run on Windows with jpackage available)."
-    dependsOn("packageReleaseExe")
+    description = "Compatibility alias: builds the portable bundle instead of an installer EXE."
+    dependsOn("packagePortable")
 }
