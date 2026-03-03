@@ -85,8 +85,15 @@ tasks.register<Delete>("cleanGeneratedData") {
 }
 
 
+tasks.register("packageBookImporterPortable") {
+    group = "application"
+    description = "Package the desktop book importer as a portable app distribution."
+    dependsOn(":bookimporter:packagePortable")
+}
+
+
 tasks.register("packageBookImporterWindowsExe") {
     group = "application"
-    description = "Package the desktop book importer as a Windows EXE (run on Windows)."
-    dependsOn(":bookimporter:packageWindowsExe")
+    description = "Compatibility alias: packages the desktop book importer as a portable app distribution."
+    dependsOn("packageBookImporterPortable")
 }
