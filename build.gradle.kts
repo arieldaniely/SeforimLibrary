@@ -85,8 +85,8 @@ tasks.register<Delete>("cleanGeneratedData") {
 }
 
 
-tasks.register("packageBookImporterWindowsExe") {
+tasks.register("packageBookImporterWindowsPortable") {
     group = "application"
-    description = "Package the desktop book importer as a Windows EXE (run on Windows)."
-    dependsOn(":bookimporter:packageWindowsExe")
+    description = "Package the desktop book importer as a portable Windows ZIP (run on Windows)."
+    dependsOn(":bookimporter:packageWindowsPortable")
 }
