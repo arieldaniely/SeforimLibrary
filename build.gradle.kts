@@ -96,4 +96,7 @@ tasks.register("packageBookImporterWindowsExe") {
     group = "application"
     description = "Compatibility alias: packages the desktop book importer as a portable app distribution."
     dependsOn("packageBookImporterPortable")
+    group = "application"
+    description = "Package the desktop book importer as a portable app distribution."
+    dependsOn(":bookimporter:packagePortable")
 }

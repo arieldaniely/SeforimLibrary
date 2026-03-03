@@ -58,4 +58,8 @@ tasks.register("packageWindowsExe") {
     group = "distribution"
     description = "Compatibility alias: builds the portable bundle instead of an installer EXE."
     dependsOn("packagePortable")
+tasks.register("packagePortable") {
+    group = "distribution"
+    description = "Build a portable app distribution for the desktop importer (no installer)."
+    dependsOn("createReleaseDistributable")
 }

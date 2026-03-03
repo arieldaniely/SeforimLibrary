@@ -22,6 +22,7 @@ Portable desktop tool (Compose for Desktop, JVM) for appending new books into an
 ## Build distributables
 
 Portable bundle (no installer):
+Portable distribution folder (no installer):
 
 ```bash
 ./gradlew :bookimporter:packagePortable
@@ -33,6 +34,8 @@ Portable bundle (no installer):
 
 1. Build or copy the generated ZIP from `generator/bookimporter/build/compose/binaries/main-release/portable/` (or use the app folder in `.../app/`).
 2. Extract and move the folder anywhere you want (USB, shared drive, etc.).
+1. Build or copy the generated app folder from `generator/bookimporter/build/compose/binaries/main-release/app/`.
+2. Move the folder anywhere you want (USB, shared drive, etc.).
 3. Run the launcher inside that folder.
 4. Select DB + book folder(s), run **Scan + Preview**, then **Execute Import**.
 
