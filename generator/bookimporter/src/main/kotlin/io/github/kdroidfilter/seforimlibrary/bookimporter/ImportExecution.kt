@@ -29,7 +29,8 @@ class ImportCoordinator(
 
             roots.forEach { root ->
                 currentCoroutineContext().ensureActive()
-                val sourceDir = root.absolutePathString()
+                val sourceRoot = resolveOtzariaSourceRoot(root)
+                val sourceDir = sourceRoot.absolutePathString()
 
                 progress(stepIndex.toFloat() / totalSteps, "Importing lines from $sourceDir")
                 log("[INFO] Running GenerateLines for root: $sourceDir")
@@ -98,6 +99,13 @@ class ImportCoordinator(
     private fun restoreBackup(backup: Path, db: Path) {
         Files.copy(backup, db, StandardCopyOption.REPLACE_EXISTING)
     }
+}
+
+
+private fun resolveOtzariaSourceRoot(root: Path): Path {
+    val normalized = root.toAbsolutePath().normalize()
+    val dirName = normalized.fileName?.toString()
+    return if (dirName == "אוצריא") normalized.parent ?: normalized else normalized
 }
 
 private fun invokeArrayMain(className: String, args: Array<String>) {
