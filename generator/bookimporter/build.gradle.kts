@@ -37,6 +37,7 @@ compose.desktop {
     }
 }
 
+tasks.register("packagePortableBundle", org.gradle.api.tasks.bundling.Zip::class) {
 tasks.register<Zip>("packagePortableBundle") {
     group = "distribution"
     description = "Create a portable ZIP bundle for the desktop importer (no installer)."
