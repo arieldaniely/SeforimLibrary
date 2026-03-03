@@ -1,3 +1,5 @@
+import org.gradle.api.tasks.bundling.Zip
+
 plugins {
     kotlin("jvm")
     alias(libs.plugins.compose)
@@ -36,6 +38,7 @@ compose.desktop {
 }
 
 tasks.register("packagePortableBundle", org.gradle.api.tasks.bundling.Zip::class) {
+tasks.register<Zip>("packagePortableBundle") {
     group = "distribution"
     description = "Create a portable ZIP bundle for the desktop importer (no installer)."
     dependsOn("createReleaseDistributable")
@@ -56,4 +59,8 @@ tasks.register("packageWindowsExe") {
     group = "distribution"
     description = "Compatibility alias: builds the portable bundle instead of an installer EXE."
     dependsOn("packagePortable")
+tasks.register("packagePortable") {
+    group = "distribution"
+    description = "Build a portable app distribution for the desktop importer (no installer)."
+    dependsOn("createReleaseDistributable")
 }
