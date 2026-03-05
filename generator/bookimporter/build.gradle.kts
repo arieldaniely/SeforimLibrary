@@ -17,6 +17,8 @@ dependencies {
     implementation(project(":otzariasqlite"))
     implementation(project(":catalog"))
     implementation(project(":searchindex"))
+
+    testImplementation(kotlin("test"))
 }
 
 compose.desktop {
@@ -36,6 +38,7 @@ compose.desktop {
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb
             )
+            modules("java.net.http")
         }
     }
 }
