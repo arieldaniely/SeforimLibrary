@@ -9,7 +9,9 @@ import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
 import java.io.File
+import java.nio.file.Files
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 
 /**
  * Phase 1 entry point: generate categories, books, TOCs and lines only.
@@ -131,14 +133,32 @@ fun main(args: Array<String>) = runBlocking {
             runCatching {
                 val outFile = File(persistDbPath)
                 outFile.parentFile?.mkdirs()
-                if (outFile.exists()) {
-                    outFile.delete()
-                    logger.i { "Existing DB removed to allow VACUUM INTO" }
+
+                val tempFile = File("$persistDbPath.vacuum.tmp")
+                if (tempFile.exists()) {
+                    Files.deleteIfExists(tempFile.toPath())
+                    logger.i { "Removed stale temporary DB at ${tempFile.absolutePath}" }
                 }
-                val escaped = persistDbPath.replace("'", "''")
-                logger.i { "Persisting in-memory DB to $persistDbPath via VACUUM INTO..." }
-                repository.executeRawQuery("VACUUM INTO '$escaped'")
-                logger.i { "In-memory DB persisted to $persistDbPath" }
+
+                val escapedTemp = tempFile.absolutePath.replace("'", "''")
+                logger.i { "Persisting in-memory DB to temporary file ${tempFile.absolutePath} via VACUUM INTO..." }
+                repository.executeRawQuery("VACUUM INTO '$escapedTemp'")
+
+                runCatching {
+                    Files.move(
+                        tempFile.toPath(),
+                        outFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE
+                    )
+                }.recoverCatching {
+                    Files.move(
+                        tempFile.toPath(),
+                        outFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                }.getOrThrow()
+                logger.i { "In-memory DB persisted to ${outFile.absolutePath}" }
             }.onFailure { e ->
                 logger.e(e) { "Failed to persist in-memory DB to $persistDbPath" }
                 throw e
