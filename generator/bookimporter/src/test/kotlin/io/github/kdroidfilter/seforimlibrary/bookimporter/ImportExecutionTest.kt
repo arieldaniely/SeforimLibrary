@@ -24,4 +24,17 @@ class ImportExecutionTest {
 
         assertEquals("IllegalArgumentException (no message provided)", description)
     }
+
+    @Test
+    fun describeForUiAddsActionableHintForMissingHttpClientClass() {
+        val error = NoClassDefFoundError("java/net/http/HttpClient")
+
+        val description = error.describeForUi()
+
+        assertEquals(
+            "הסביבה חסרה את java.net.http.HttpClient. התקינו גרסה עדכנית של היישום (כולל runtime מלא) או הפעילו עם Java 11+ מלאה.",
+            description
+        )
+    }
+
 }

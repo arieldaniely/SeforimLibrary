@@ -85,6 +85,9 @@ class ImportCoordinator(
             if (totalSteps > 0) {
                 progress(stepIndex.toFloat() / totalSteps, "Import completed")
             }
+        }.onSuccess {
+            Files.deleteIfExists(backup)
+            log("[INFO] Backup deleted: ${backup.absolutePathString()}")
         }.onFailure { error ->
             restoreBackup(backup, dbPath)
             val resolved = error.unwrapInvocationTarget()
@@ -116,12 +119,24 @@ internal fun Throwable.unwrapInvocationTarget(): Throwable {
 }
 
 internal fun Throwable.describeForUi(): String {
+    val missingClass = missingRuntimeClassName()
+    if (missingClass == "java.net.http.HttpClient") {
+        return "חסר מודול java.net.http (HttpClient). כנראה שה-runtime שנארז לא כולל java.net.http. הפתרון: לכלול את המודול ב-jlink/jpackage או להשתמש ב-Java 11+ עם runtime מתאים."
+    }
+
     val message = message?.trim().orEmpty()
     return if (message.isNotEmpty()) {
         message
     } else {
         "${this::class.simpleName ?: "Unknown error"} (no message provided)"
     }
+}
+
+private fun Throwable.missingRuntimeClassName(): String? {
+    if (this !is NoClassDefFoundError && this !is ClassNotFoundException) return null
+    val raw = message?.trim().orEmpty()
+    if (raw.isEmpty()) return null
+    return raw.replace('/', '.')
 }
 
 private fun Throwable.stackTraceToStringSafe(): String {
