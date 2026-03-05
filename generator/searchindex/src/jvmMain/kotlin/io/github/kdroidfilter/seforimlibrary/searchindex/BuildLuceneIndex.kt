@@ -247,7 +247,8 @@ fun main() = runBlocking {
 }
 
 private fun normalizeForIndexDefault(html: String): String {
-    val cleaned = Jsoup.clean(html, Safelist.none())
+    val htmlForNormalization = html.take(MAX_HTML_INPUT_CHARS)
+    val cleaned = stripHtmlForIndex(htmlForNormalization)
         .trim()
         .replace("\\s+".toRegex(), " ")
     val withoutMaqaf = HebrewTextUtils.replaceMaqaf(cleaned, " ")
@@ -259,6 +260,42 @@ private fun normalizeForIndexDefault(html: String): String {
     val noFinals = normalizeFinalLetters(withoutGeresh)
     // Drop diacritics entirely to index unpointed text
     return HebrewTextUtils.removeAllDiacritics(noFinals)
+}
+
+private fun stripHtmlForIndex(html: String): String {
+    if ('<' !in html && '&' !in html) return html
+    if (html.length > MAX_SAFE_JSOUP_INPUT_CHARS) return stripHtmlLightweight(html)
+
+    return runCatching { Jsoup.clean(html, Safelist.none()) }
+        .getOrElse { stripHtmlLightweight(html) }
+}
+
+private fun stripHtmlLightweight(html: String): String {
+    val output = StringBuilder(minOf(html.length, MAX_NORMALIZED_OUTPUT_CHARS))
+    var insideTag = false
+
+    for (ch in html) {
+        when {
+            ch == '<' -> insideTag = true
+            ch == '>' -> {
+                insideTag = false
+                output.append(' ')
+            }
+
+            !insideTag -> {
+                output.append(
+                    when (ch) {
+                        '\n', '\r', '\t' -> ' '
+                        else -> ch
+                    }
+                )
+            }
+        }
+
+        if (output.length >= MAX_NORMALIZED_OUTPUT_CHARS) break
+    }
+
+    return output.toString()
 }
 
 private fun sanitizeAcronymTerm(raw: String): String {
@@ -280,3 +317,7 @@ private fun normalizeFinalLetters(text: String): String = text
     .replace('\u05DF', '\u05E0') // ן -> נ
     .replace('\u05E3', '\u05E4') // ף -> פ
     .replace('\u05E5', '\u05E6') // ץ -> צ
+
+private const val MAX_HTML_INPUT_CHARS = 1_000_000
+private const val MAX_SAFE_JSOUP_INPUT_CHARS = 200_000
+private const val MAX_NORMALIZED_OUTPUT_CHARS = 300_000
