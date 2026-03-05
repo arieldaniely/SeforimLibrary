@@ -38,6 +38,8 @@ fun main(args: Array<String>) = runBlocking {
     val driver = JdbcSqliteDriver(url = jdbcUrl)
     val repository = SeforimRepository(dbPath, driver)
 
+    var persistedTempFile: java.io.File? = null
+
     try {
         // If using in-memory DB, seed it from base DB on disk if provided
         if (useMemoryDb) {
@@ -102,31 +104,39 @@ fun main(args: Array<String>) = runBlocking {
                 logger.i { "Persisting in-memory DB to temporary file ${tempFile.absolutePath} via VACUUM INTO..." }
                 repository.executeRawQuery("VACUUM INTO '$escapedTemp'")
 
-                runCatching {
-                    Files.move(
-                        tempFile.toPath(),
-                        outFile.toPath(),
-                        StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE
-                    )
-                }.recoverCatching {
-                    Files.move(
-                        tempFile.toPath(),
-                        outFile.toPath(),
-                        StandardCopyOption.REPLACE_EXISTING
-                    )
-                }.getOrThrow()
-                logger.i { "In-memory DB persisted to ${outFile.absolutePath}" }
+                persistedTempFile = tempFile
+                logger.i { "In-memory DB persisted to temporary file ${tempFile.absolutePath}" }
             }.onFailure { e ->
                 logger.e(e) { "Failed to persist in-memory DB to $persistDbPath" }
                 throw e
             }
         }
-        logger.i { "Phase 2 completed successfully. Links processed. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
     } catch (e: Exception) {
         logger.e(e) { "Error during phase 2 (links)" }
         throw e
     } finally {
         repository.close()
     }
+
+    if (useMemoryDb) {
+        val outFile = java.io.File(persistDbPath)
+        val tempFile = checkNotNull(persistedTempFile) { "In-memory DB persistence did not produce a temporary DB file." }
+        runCatching {
+            Files.move(
+                tempFile.toPath(),
+                outFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE
+            )
+        }.recoverCatching {
+            Files.move(
+                tempFile.toPath(),
+                outFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        }.getOrThrow()
+        logger.i { "In-memory DB persisted to ${outFile.absolutePath}" }
+    }
+
+    logger.i { "Phase 2 completed successfully. Links processed. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
 }
