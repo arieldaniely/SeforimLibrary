@@ -2,6 +2,9 @@ package io.github.kdroidfilter.seforimlibrary.bookimporter
 
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.lang.reflect.InvocationTargetException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -84,8 +87,11 @@ class ImportCoordinator(
             }
         }.onFailure { error ->
             restoreBackup(backup, dbPath)
-            log("[ERROR] Import failed, DB restored from backup: ${error.message}")
-            throw error
+            val resolved = error.unwrapInvocationTarget()
+            log("[ERROR] Import failed, DB restored from backup: ${resolved.describeForUi()}")
+            log("[ERROR] Root cause type: ${resolved::class.qualifiedName}")
+            log("[ERROR] Stacktrace:\n${resolved.stackTraceToStringSafe()}")
+            throw resolved
         }
     }
 
@@ -99,6 +105,29 @@ class ImportCoordinator(
     private fun restoreBackup(backup: Path, db: Path) {
         Files.copy(backup, db, StandardCopyOption.REPLACE_EXISTING)
     }
+}
+
+internal fun Throwable.unwrapInvocationTarget(): Throwable {
+    var current: Throwable = this
+    while (current is InvocationTargetException && current.cause != null) {
+        current = current.cause!!
+    }
+    return current
+}
+
+internal fun Throwable.describeForUi(): String {
+    val message = message?.trim().orEmpty()
+    return if (message.isNotEmpty()) {
+        message
+    } else {
+        "${this::class.simpleName ?: "Unknown error"} (no message provided)"
+    }
+}
+
+private fun Throwable.stackTraceToStringSafe(): String {
+    val writer = StringWriter()
+    printStackTrace(PrintWriter(writer))
+    return writer.toString().trimEnd()
 }
 
 

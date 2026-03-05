@@ -17,6 +17,8 @@ dependencies {
     implementation(project(":otzariasqlite"))
     implementation(project(":catalog"))
     implementation(project(":searchindex"))
+
+    testImplementation(kotlin("test"))
 }
 
 compose.desktop {
