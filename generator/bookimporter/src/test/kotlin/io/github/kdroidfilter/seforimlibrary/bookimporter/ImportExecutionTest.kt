@@ -32,7 +32,7 @@ class ImportExecutionTest {
         val description = error.describeForUi()
 
         assertEquals(
-            "הסביבה חסרה את java.net.http.HttpClient. התקינו גרסה עדכנית של היישום (כולל runtime מלא) או הפעילו עם Java 11+ מלאה.",
+            "חסר מודול java.net.http (HttpClient). כנראה שה-runtime שנארז לא כולל java.net.http. הפתרון: לכלול את המודול ב-jlink/jpackage או להשתמש ב-Java 11+ עם runtime מתאים.",
             description
         )
     }

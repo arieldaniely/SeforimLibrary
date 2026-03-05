@@ -40,12 +40,14 @@ class ImportCoordinator(
                 runWithProperties(
                     mapOf(
                         "appendExistingDb" to "true",
-                        "baseDb" to dbPath.absolutePathString(),
-                        "persistDb" to dbPath.absolutePathString(),
+                        "seforimDb" to dbPath.absolutePathString(),
                         "sourceDir" to sourceDir
                     )
                 ) {
-                    invokeArrayMain("io.github.kdroidfilter.seforimlibrary.otzariasqlite.GenerateLinesKt", arrayOf(":memory:"))
+                    invokeArrayMain(
+                        "io.github.kdroidfilter.seforimlibrary.otzariasqlite.GenerateLinesKt",
+                        arrayOf(dbPath.absolutePathString())
+                    )
                 }
                 stepIndex++
 
@@ -54,12 +56,14 @@ class ImportCoordinator(
                 log("[INFO] Running GenerateLinks for root: $sourceDir")
                 runWithProperties(
                     mapOf(
-                        "baseDb" to dbPath.absolutePathString(),
-                        "persistDb" to dbPath.absolutePathString(),
+                        "seforimDb" to dbPath.absolutePathString(),
                         "sourceDir" to sourceDir
                     )
                 ) {
-                    invokeArrayMain("io.github.kdroidfilter.seforimlibrary.otzariasqlite.GenerateLinksKt", arrayOf(":memory:"))
+                    invokeArrayMain(
+                        "io.github.kdroidfilter.seforimlibrary.otzariasqlite.GenerateLinksKt",
+                        arrayOf(dbPath.absolutePathString())
+                    )
                 }
                 stepIndex++
             }

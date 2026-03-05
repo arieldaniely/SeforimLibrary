@@ -194,11 +194,10 @@ tasks.register<JavaExec>("appendOtzariaLines") {
     }
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
-    // Use in-memory DB for speed; seed from baseDb; persist to persistDb (can equal baseDb)
-    args(":memory:")
+    // Append directly to existing DB to avoid replacing DB file during import.
+    args(persistDb)
     systemProperty("appendExistingDb", "true")
-    systemProperty("baseDb", baseDb)
-    systemProperty("persistDb", persistDb)
+    systemProperty("seforimDb", persistDb)
 
     val defaultAcronymDb = layout.buildDirectory.file("acronymizer/acronymizer.db").get().asFile.absolutePath
     if (project.hasProperty("acronymDb")) {
@@ -237,9 +236,8 @@ tasks.register<JavaExec>("appendOtzariaLinks") {
     }
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
-    args(":memory:")
-    systemProperty("baseDb", persistDb)
-    systemProperty("persistDb", persistDb)
+    args(persistDb)
+    systemProperty("seforimDb", persistDb)
 
     if (project.hasProperty("sourceDir")) {
         systemProperty("sourceDir", project.property("sourceDir") as String)
