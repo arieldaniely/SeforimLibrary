@@ -53,8 +53,8 @@ fun main(args: Array<String>) = runBlocking {
                     repository.executeRawQuery("PRAGMA foreign_keys=OFF")
                     val escaped = baseDb.replace("'", "''")
                     repository.executeRawQuery("ATTACH DATABASE '$escaped' AS disk")
-                    // Load all table names from attached DB
-                    val tables = driver.executeQuery(null,
+                    // Load all table names from attached DB and keep only those existing in main schema
+                    val diskTables = driver.executeQuery(null,
                         "SELECT name FROM disk.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
                         { c: SqlCursor ->
                             val list = mutableListOf<String>()
@@ -64,7 +64,23 @@ fun main(args: Array<String>) = runBlocking {
                             QueryResult.Value(list)
                         }, 0
                     ).value
-                    // Copy data for each table into main
+                    val mainTables = driver.executeQuery(null,
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                        { c: SqlCursor ->
+                            val list = mutableListOf<String>()
+                            while (c.next().value) {
+                                c.getString(0)?.let { list.add(it) }
+                            }
+                            QueryResult.Value(list)
+                        }, 0
+                    ).value.toSet()
+                    val tables = diskTables.filter { it in mainTables }
+                    val skippedTables = diskTables.filterNot { it in mainTables }
+                    if (skippedTables.isNotEmpty()) {
+                        logger.w { "Skipping ${skippedTables.size} unsupported tables while seeding: ${skippedTables.joinToString()}" }
+                    }
+
+                    // Copy data for each shared table into main
                     for (t in tables) {
                         val tn = t
                         repository.executeRawQuery("DELETE FROM \"$tn\"")
@@ -74,7 +90,8 @@ fun main(args: Array<String>) = runBlocking {
                     repository.executeRawQuery("PRAGMA foreign_keys=ON")
                     logger.i { "Seeding completed. Imported ${'$'}{tables.size} tables." }
                 }.onFailure { e ->
-                    logger.e(e) { "Failed to seed in-memory DB from $baseDb. Links may not be processed." }
+                    logger.e(e) { "Failed to seed in-memory DB from $baseDb" }
+                    throw IllegalStateException("Unable to seed in-memory DB from existing database at $baseDb. Aborting to avoid overwriting with partial data.", e)
                 }
             } else {
                 logger.w { "Base DB not found at $baseDb; running with empty in-memory DB" }

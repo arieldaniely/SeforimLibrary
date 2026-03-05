@@ -91,7 +91,7 @@ fun main(args: Array<String>) = runBlocking {
                     repository.executeRawQuery("PRAGMA foreign_keys=OFF")
                     val escaped = baseFile.absolutePath.replace("'", "''")
                     repository.executeRawQuery("ATTACH DATABASE '$escaped' AS disk")
-                    val tables = driver.executeQuery(
+                    val diskTables = driver.executeQuery(
                         null,
                         "SELECT name FROM disk.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
                         { c: SqlCursor ->
@@ -103,6 +103,24 @@ fun main(args: Array<String>) = runBlocking {
                         },
                         0
                     ).value
+                    val mainTables = driver.executeQuery(
+                        null,
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                        { c: SqlCursor ->
+                            val list = mutableListOf<String>()
+                            while (c.next().value) {
+                                c.getString(0)?.let { list.add(it) }
+                            }
+                            QueryResult.Value(list)
+                        },
+                        0
+                    ).value.toSet()
+                    val tables = diskTables.filter { it in mainTables }
+                    val skippedTables = diskTables.filterNot { it in mainTables }
+                    if (skippedTables.isNotEmpty()) {
+                        logger.w { "Skipping ${skippedTables.size} unsupported tables while seeding: ${skippedTables.joinToString()}" }
+                    }
+
                     for (t in tables) {
                         repository.executeRawQuery("DELETE FROM \"$t\"")
                         repository.executeRawQuery("INSERT INTO \"$t\" SELECT * FROM disk.\"$t\"")
@@ -111,7 +129,8 @@ fun main(args: Array<String>) = runBlocking {
                     repository.executeRawQuery("PRAGMA foreign_keys=ON")
                     logger.i { "Seeding completed. Imported ${tables.size} tables." }
                 }.onFailure { e ->
-                    logger.e(e) { "Failed to seed in-memory DB from $baseDbPath; continuing with empty DB." }
+                    logger.e(e) { "Failed to seed in-memory DB from $baseDbPath" }
+                    throw IllegalStateException("Unable to seed in-memory DB from existing database at $baseDbPath. Aborting to avoid overwriting with partial data.", e)
                 }
             } else {
                 logger.w { "appendExistingDb enabled but base DB not found at $baseDbPath; starting from empty in-memory DB" }
