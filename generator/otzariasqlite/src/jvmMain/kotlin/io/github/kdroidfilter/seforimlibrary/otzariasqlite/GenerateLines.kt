@@ -121,6 +121,8 @@ fun main(args: Array<String>) = runBlocking {
         }
     }
 
+    var persistedTempFile: File? = null
+
     try {
         val generator = DatabaseGenerator(
             sourceDirectory = Paths.get(sourceDir),
@@ -144,31 +146,39 @@ fun main(args: Array<String>) = runBlocking {
                 logger.i { "Persisting in-memory DB to temporary file ${tempFile.absolutePath} via VACUUM INTO..." }
                 repository.executeRawQuery("VACUUM INTO '$escapedTemp'")
 
-                runCatching {
-                    Files.move(
-                        tempFile.toPath(),
-                        outFile.toPath(),
-                        StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE
-                    )
-                }.recoverCatching {
-                    Files.move(
-                        tempFile.toPath(),
-                        outFile.toPath(),
-                        StandardCopyOption.REPLACE_EXISTING
-                    )
-                }.getOrThrow()
-                logger.i { "In-memory DB persisted to ${outFile.absolutePath}" }
+                persistedTempFile = tempFile
+                logger.i { "In-memory DB persisted to temporary file ${tempFile.absolutePath}" }
             }.onFailure { e ->
                 logger.e(e) { "Failed to persist in-memory DB to $persistDbPath" }
                 throw e
             }
         }
-        logger.i { "Phase 1 completed successfully. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
     } catch (e: Exception) {
         logger.e(e) { "Error during phase 1 generation" }
         throw e
     } finally {
         repository.close()
     }
+
+    if (useMemoryDb) {
+        val outFile = File(persistDbPath)
+        val tempFile = checkNotNull(persistedTempFile) { "In-memory DB persistence did not produce a temporary DB file." }
+        runCatching {
+            Files.move(
+                tempFile.toPath(),
+                outFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE
+            )
+        }.recoverCatching {
+            Files.move(
+                tempFile.toPath(),
+                outFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        }.getOrThrow()
+        logger.i { "In-memory DB persisted to ${outFile.absolutePath}" }
+    }
+
+    logger.i { "Phase 1 completed successfully. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
 }
