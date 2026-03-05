@@ -85,6 +85,9 @@ class ImportCoordinator(
             if (totalSteps > 0) {
                 progress(stepIndex.toFloat() / totalSteps, "Import completed")
             }
+        }.onSuccess {
+            Files.deleteIfExists(backup)
+            log("[INFO] Backup deleted: ${backup.absolutePathString()}")
         }.onFailure { error ->
             restoreBackup(backup, dbPath)
             val resolved = error.unwrapInvocationTarget()
@@ -118,7 +121,7 @@ internal fun Throwable.unwrapInvocationTarget(): Throwable {
 internal fun Throwable.describeForUi(): String {
     val missingClass = missingRuntimeClassName()
     if (missingClass == "java.net.http.HttpClient") {
-        return "הסביבה חסרה את java.net.http.HttpClient. התקינו גרסה עדכנית של היישום (כולל runtime מלא) או הפעילו עם Java 11+ מלאה."
+        return "חסר מודול java.net.http (HttpClient). כנראה שה-runtime שנארז לא כולל java.net.http. הפתרון: לכלול את המודול ב-jlink/jpackage או להשתמש ב-Java 11+ עם runtime מתאים."
     }
 
     val message = message?.trim().orEmpty()
@@ -131,7 +134,6 @@ internal fun Throwable.describeForUi(): String {
 
 private fun Throwable.missingRuntimeClassName(): String? {
     if (this !is NoClassDefFoundError && this !is ClassNotFoundException) return null
-
     val raw = message?.trim().orEmpty()
     if (raw.isEmpty()) return null
     return raw.replace('/', '.')
