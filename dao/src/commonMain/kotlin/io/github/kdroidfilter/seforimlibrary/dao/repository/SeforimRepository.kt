@@ -78,10 +78,26 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
     }
 
     // --- Transactions ---
-    // Avoid custom transaction management that wraps the entire generation.
-    // Use SQLDelight's default behavior (per‑statement auto-commit) at call sites.
-    // Keep signature for compatibility with existing callers.
-    suspend fun <T> runInTransaction(block: suspend () -> T): T = block()
+    // Keep this suspend signature for call sites in generators, while ensuring
+    // bulk imports actually run inside a single SQLite transaction.
+    suspend fun <T> runInTransaction(block: suspend () -> T): T {
+        withContext(Dispatchers.IO) {
+            driver.execute(null, "BEGIN IMMEDIATE", 0)
+        }
+
+        return try {
+            val result = block()
+            withContext(Dispatchers.IO) {
+                driver.execute(null, "COMMIT", 0)
+            }
+            result
+        } catch (t: Throwable) {
+            withContext(Dispatchers.IO) {
+                driver.execute(null, "ROLLBACK", 0)
+            }
+            throw t
+        }
+    }
 
     // --- ID helpers ---
 
