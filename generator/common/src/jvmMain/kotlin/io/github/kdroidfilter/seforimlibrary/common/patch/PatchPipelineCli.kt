@@ -63,24 +63,18 @@ fun main(args: Array<String>) {
     DriverManager.getConnection("jdbc:sqlite:${target.toAbsolutePath()}").use { conn ->
         conn.createStatement().use { it.execute("PRAGMA foreign_keys = ON") }
         // The producer ships upserts/deletes for every table in
-        // PATCH_TABLES_IN_FK_ORDER (including the book_* junctions and
-        // book_generation). We still don't pass expectedToContentHash into
-        // apply(): the hash equality is checked below as a soft gate (warn, not
-        // throw) so a mismatch on a not-yet-fully-covered derived table doesn't
-        // fail the whole pipeline. Tighten to a hard assert once every tracked
-        // table is confirmed to round-trip.
+        // PATCH_TABLES_IN_FK_ORDER (including the book_* junctions,
+        // book_generation and link_range) — all confirmed to round-trip
+        // exactly across the v13→v14/v14→v15 verifications. HARD gate: a
+        // patch that does not reproduce the target byte-for-logical-byte is
+        // a broken distribution artifact and must never ship with a warning.
         PatchApplier(logger).apply(conn = conn, patchDb = outPath)
         val appliedHash = LogicalContentHasher().compute(conn)
-        if (appliedHash == newHash) {
-            logger.i { "✅ Patch apply verified: target hash matches new ($newHash)" }
-        } else {
-            logger.w {
-                "Patch applied without errors but logical content hash differs " +
-                    "(applied=$appliedHash, expected=$newHash). " +
-                    "Soft gate: a tracked table did not round-trip exactly — " +
-                    "inspect with diagnoseHashMismatch before trusting this patch."
-            }
+        check(appliedHash == newHash) {
+            "Patch verification FAILED: applied=$appliedHash expected=$newHash — " +
+                "inspect with diagnoseHashMismatch; refusing to publish this patch."
         }
+        logger.i { "✅ Patch apply verified: target hash matches new ($newHash)" }
     }
     runCatching { Files.deleteIfExists(target) }
 

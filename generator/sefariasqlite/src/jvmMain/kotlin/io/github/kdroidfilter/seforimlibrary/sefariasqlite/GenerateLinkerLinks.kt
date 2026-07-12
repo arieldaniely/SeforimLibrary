@@ -162,10 +162,19 @@ fun main(args: Array<String>) = runBlocking {
         // linkId → (endLineId, endLineIndex): target-side scope end for multi-line
         // citations (a whole amud/section or a dashed range). Written as link_range
         // side=1 so the app shows the range in the title and loads the full content
-        // in the preview. Widest end wins when the same pair is cited at two scopes.
-        // No link_coverage rows — target-page surfacing stays first-line-only.
+        // in the preview. No link_coverage rows — target-page surfacing stays
+        // first-line-only.
+        //
+        // KNOWN TRADE-OFF — widest end wins: when one source line cites the same
+        // target at two scopes ("27:7" AND "27:7-8"), both resolve to one link
+        // (stable id = src,tgt,type) and the wider range is kept, so the narrow
+        // citation's preview shows a longer passage that still STARTS at its exact
+        // target. Splitting them would either churn every stable link id (scope in
+        // the key) or need per-anchor scope columns (schema+app change) — not worth
+        // it for the ~0.07% of ranges affected.
         val rangeEndByLink = HashMap<Long, Pair<Long, Int>>()
         var links = 0; var anchors = 0; var unresolvedTarget = 0; var unmappedSource = 0; var staleSource = 0
+        var missingSourceHash = 0
 
         suspend fun flush() {
             if (linkBatch.isNotEmpty()) { repository.insertLinksBatch(linkBatch); linkBatch.clear() }
@@ -179,6 +188,9 @@ fun main(args: Array<String>) = runBlocking {
                 for (line in lines) {
                     if (line.isBlank()) continue
                     val rec = json.decodeFromString<ArtifactRecord>(line)
+                    // Contract check FIRST, before any skip path (unresolved target,
+                    // self-link) can hide a hash-less record from -PlinkerStrict.
+                    if (rec.source_hash == null) missingSourceHash++
                     // target: resolveRefs → RefEntry → lineId (sidecar) → (bookId, 0-based idx) via lineMeta
                     val tgtEntry = resolveRefs(rec.target_ref, refsByCanonical, refsByBase).firstOrNull()
                     val tgtLineId = tgtEntry?.let { lineIdByRefKey[it.path to it.lineIndex] }
@@ -193,6 +205,8 @@ fun main(args: Array<String>) = runBlocking {
                     // Source-drift guard: the offsets index the snapshot the linker ran on. If this
                     // source line changed since (cross-cycle drift), the offsets are untrustworthy —
                     // safe-drop the whole record (link + anchor); it recovers on the next re-link.
+                    // A record with NO hash bypasses the guard — already counted at decode,
+                    // fatal under -PlinkerStrict (every engine-produced record carries one).
                     val content = contentFor(srcLineId)
                     if (rec.source_hash != null && hashFor(srcLineId) != rec.source_hash) { staleSource++; continue }
 
@@ -247,12 +261,13 @@ fun main(args: Array<String>) = runBlocking {
         logger.i { "LINKER: $links links, $anchors anchors, ${rangeEndByLink.size} target ranges (unresolved target: $unresolvedTarget, unmapped source: $unmappedSource, stale source: $staleSource)" }
 
         // Serial-pipeline invariant (-PlinkerStrict): the linker just ran on THIS build's
-        // snapshot, so every record's source line must exist and match its stamped hash.
+        // snapshot, so every record's source line must exist, carry a hash, and match it.
         // A violation means the artifacts came from some other snapshot — fail the build.
+        // (unresolvedTarget stays advisory: refs to books outside the corpus are expected.)
         if (prop("linkerStrict", null)?.toBoolean() == true) {
-            check(unmappedSource == 0 && staleSource == 0) {
-                "linkerStrict: unmapped source=$unmappedSource, stale source=$staleSource — " +
-                    "artifacts do not match this build's snapshot"
+            check(unmappedSource == 0 && staleSource == 0 && missingSourceHash == 0) {
+                "linkerStrict: unmapped source=$unmappedSource, stale source=$staleSource, " +
+                    "missing source_hash=$missingSourceHash — artifacts do not match this build's snapshot"
             }
         }
 

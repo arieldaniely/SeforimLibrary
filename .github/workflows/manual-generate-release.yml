@@ -269,13 +269,20 @@ jobs:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
         run: |
           set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN secret is empty or missing on this repo — re-run: gh secret set PIPELINE_TOKEN -R Otzaria/SeforimLibrary"; exit 1; }
           gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
             -f library_run_id=${{ github.run_id }}
-          # Runs register asynchronously; nothing else dispatches relink.yml concurrently
-          # (this workflow's concurrency group is the only trigger), so "newest" is ours.
-          sleep 20
-          RUN=$(gh run list -R Otzaria/LinkerToOtzaria -w relink.yml -L1 \
-            --json databaseId -q '.[0].databaseId')
+          # Identify OUR run deterministically: relink.yml stamps library_run_id into its
+          # run-name, so a concurrent manual dispatch can never be picked up by mistake.
+          RUN=""
+          for _ in $(seq 1 30); do
+            sleep 10
+            RUN=$(gh run list -R Otzaria/LinkerToOtzaria -w relink.yml -L20 \
+              --json databaseId,displayTitle \
+              -q '[.[] | select(.displayTitle | contains("library_run_id=${{ github.run_id }}"))][0].databaseId')
+            [ -n "$RUN" ] && break
+          done
+          [ -n "$RUN" ] || { echo "::error::relink run for library_run_id=${{ github.run_id }} never appeared"; exit 1; }
           echo "relink run: $RUN"
           echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
           gh run watch "$RUN" -R Otzaria/LinkerToOtzaria --exit-status
