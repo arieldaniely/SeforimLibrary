@@ -12,6 +12,13 @@
   הספציפיים לאוצריא. כך בהיסטוריה של `otzaria` **רואים בבירור איפה כל ענף מתחיל ונגמר**:
 
 ```
+*   Merge branch 'linker' into otzaria          ← בועת הלינקר (ראש otzaria)
+|\
+| * Stage 5: LINKER connection type + sidecar + Phase-2 generateLinkerLinks
+| * Build: publish lines_snapshot.db.zst for the linker
+| * Linker stage 0: fix Otzaria source-hash detection + add dumpLines
+|/
+*   … קומיטי-אוצריא (blacklist / תא שמע / manifest) …
 *   Merge branch 'feat/otzaria-ranged-links-and-alt-toc' into otzaria
 |\
 | * fix(otzaria): שמירת קישורי SOURCE בכיוון קנוני (בסיס→מפרש)
@@ -39,6 +46,11 @@
 > **הבחנה חשובה:** הבועות ב-`otzaria` הן **עותקי-delta** של הפיצ'רים (SHA חדשים,
 > כמו "rebase & merge" בגיטהאב). ענפי הפיצ'ר עצמם (`fix/*`, `perf`, `word-level`,
 > `ranged`, `hearot`, `otzaria-ranged`) נשארים **טהורים ולינאריים** — מוכנים ל-PR ל-upstream.
+>
+> **חריג — `linker`:** בניגוד ליתר הענפים, `linker` **אינו** פיצ'ר טהור מעל
+> `default_commentators`. הוא מבוסס על **שכבת-התשתית של אוצריא** (זקוק ל-workflow
+> הרליס ולהורדת ספריית-אוצריא), ולכן הבועה שלו יושבת **בראש** `otzaria` — מעל
+> קומיטי-אוצריא — ולא בין שאר בועות-הפיצ'ר. `otzaria` נשארת הענף העליון (ראשה = ה-merge).
 
 ---
 
@@ -59,7 +71,11 @@ fix/category-ids-full-path → fix/book-corpus-talmud → perf/faster-generation
                                                                 [פיצ'רים — rebase, PR נפרד לכל אחד]
                                           │
                                           ▼   (כל פיצ'ר → בועת merge)
-                                       otzaria  = בועות הפיצ'רים + קומיטי-אוצריא בראש
+                                       otzaria  = בועות הפיצ'רים + קומיטי-אוצריא
+                                          │                + בועת linker בראש
+                                          ▼
+                                       linker   (7 קומיטים מעל תשתית-אוצריא) ──┐
+                                          └───────────── merge --no-ff ────────┘
 ```
 
 ## טבלת סיכום
@@ -76,9 +92,10 @@ fix/category-ids-full-path → fix/book-corpus-talmud → perf/faster-generation
 | 8 | `word-level-link-anchors` | ↑ | 3 | עוגני-מילה לקישורים |
 | 9 | `feat/ranged-links-and-book-versions` | ↑ | 4 | קישורי-טווח + גרסאות ספרים + black_versions |
 | 10 | `fix/source-numbered-prefix` | ↑ | 1 | דיכוי prefix כפול בספרים ממוספרים-במקור |
-| 11 | `feat/hearot-standalone-books` | ↑ | 1 | ספרי "הערות" עצמאיים כמפרשים |
+| 11 | `feat/hearot-standalone-books` | ↑ | 2 | ספרי "הערות" עצמאיים כמפרשים + תיקון חברותא (מזהים יציבים) |
 | 12 | `feat/otzaria-ranged-links-and-alt-toc` | ↑ | 2 | קישורי-טווח + alt-toc + תיקון SOURCE הפוך |
-| — | `otzaria` | (merge של כולם) | 12 (+manifest) | קומיטים ספציפיים לאוצריא, בראש |
+| — | `otzaria` | (merge של כולם) | 12 (+manifest) | קומיטים ספציפיים לאוצריא |
+| 13 | `linker` | תשתית-אוצריא (בראש `otzaria`) | 7 | לינקר: DumpLines + source-hash + Phase-2 + הקשחה + קישורי-טווח |
 
 ---
 
@@ -131,6 +148,10 @@ word-level anchors, ייבוא charLevelData מדויק, ותוויות תצוג
 קבצי "הערות על &lt;title&gt;" מיובאים כספרים עצמאיים מקושרים (במקום `notesContent`
 הישן שאף לקוח לא הציג), ומוגדרים כמפרשי ברירת-מחדל לפי טבלת הקישורים (לא לפי תחיליות
 שם). — `feat(otzaria): import 'הערות' companion files as standalone linked commentator books`
+- **תיקון חברותא (`GenerateHavroutaLinks.kt`):** מזהי-מקצה יציבים לקישורים טרנזיטיביים
+  (יציבות ל-delta) ומחיקה ממוקדת-סוג. — `Havrouta: stable allocator ids for transitive
+  links + type-scoped delete`. (`GenerateHavroutaLinks.kt` הוא קובץ-בסיס/upstream; התיקון
+  שוכן כאן כי זהו הפיצ'ר שמרחיב את מערכת החברותא — קישורי Talmud-Hearot.)
 
 ### 12. `feat/otzaria-ranged-links-and-alt-toc`
 מביא את הגנרטור של **otzariasqlite** לרמת ה-importer של ספריא בשלושה היבטים
@@ -157,7 +178,34 @@ word-level anchors, ייבוא charLevelData מדויק, ותוויות תצוג
 והפיכות מ-upstream: `התאמה לאוצריא`, `delta-updater לא סביב Lucene`, `ביטול catalog.pb`,
 `ביטול bundle`, `otzaria כראשי`, `manifest כשאין releases`, `הורדת ספריית אוצריא בלבד`,
 `אי-אריזת מודל ההטמעה`, `שינויי מיקומים → תת-קטגוריה`, החרגת/התרת "תא שמע", ועריכת
-`books_blacklist`. בראש — `chore: שימור release-manifest.json` + קומיטי manifest של ה-CI.
+`books_blacklist`. מעל קומיטי-אוצריא — קומיטי manifest של ה-CI, ובראש הכל **בועת `linker`**.
+
+### 13. `linker` — בועה בראש `otzaria`
+תמיכת ה-**לינקר** (Sefaria linker → קישורי-LINKER ב-DB). שבעה קומיטים המבוססים על
+**שכבת-התשתית של אוצריא** (ולכן אינם פיצ'ר טהור — ראו החריג למעלה), ממוזגים ב-`--no-ff`
+בראש `otzaria` (3 בסיס + 4 תיקונים):
+- **`Linker stage 0`** — זיהוי source-hash של אוצריא ב-`SourceHashComputer` (מעקב שינויי-מקור
+  לצורך snapshot), ו-`DumpLines` (packaging) לייצוא תוכן-שורות נקי שהלינקר החיצוני צורך.
+  נוגע גם ב-`Generator.kt` (otzariasqlite) — ולכן ממוקם מעל בועת `feat/otzaria-ranged…`.
+- **`Build: publish lines_snapshot.db.zst`** — הרחבת `manual-generate-release.yml`: dumpLines
+  על ה-DB הבנוי, דחיסה ל-`lines_snapshot.db.zst` כ-release asset, ושלב Phase-2 שמושך
+  `linker_links.zst` מהריצה הקודמת וממיר אותו לקישורי-LINKER. **תלוי בצינור-הרליס של
+  אוצריא** (catalog.pb / patch-fan / `Otzaria/LinkerToOtzaria`) — לכן חייב בסיס-אוצריא.
+- **`Stage 5: LINKER connection type + sidecar + Phase-2 generateLinkerLinks`** — סוג-קישור
+  `LINKER` ב-`Link.kt`, sidecar של `RefEntry→lineId` ב-`SefariaDirectImporter`,
+  ו-`GenerateLinkerLinks` (sefariasqlite) שמייצר את הקישורים מ-artifacts של הלינקר.
+
+ארבעה תיקונים (12/07/2026):
+- **`Phase-2 hardening`** — מטמון-תוכן חסום, מגן התנגשות-מזהים, ו-`-PlinkerStrict`
+  (`GenerateLinkerLinks` + `InMemoryIdAllocator`).
+- **`Otzaria import: never ingest legacy "linker"-typed link rows`** — הגנרטור של אוצריא
+  מדלג על שורות-קישור מסוג "linker" ישן (`Generator.kt`).
+- **`Serial linker cycle: the build runs relink mid-pipeline`** — מחזור-לינקר סריאלי
+  שרץ באמצע ה-pipeline (`manual-generate-release.yml` + מסמכי הלינקר).
+- **`Phase-2: target ranges for multi-line citations`** — טווחי-יעד לציטוטים רב-שורתיים
+  (`link_range` צד=1); `GenerateLinkerLinks` + `SefariaImportRefs`.
+> טסטים: `SourceHashComputerTest`, `GenerateLinkerLinksTest`, `InMemoryIdAllocatorTest`.
+> תיעוד: `LINKER_DELTA_PLAN.md`, `LINKER_IMPLEMENTATION_STAGES.md`.
 
 ---
 
