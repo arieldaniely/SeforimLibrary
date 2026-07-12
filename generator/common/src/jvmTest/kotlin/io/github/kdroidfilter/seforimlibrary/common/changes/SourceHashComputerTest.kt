@@ -23,9 +23,9 @@ class SourceHashComputerTest {
             root.resolve("files_manifest.json"),
             """
             {
-              "אוצריא/Tanakh/Genesis.txt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-              "אוצריא/Tanakh/Exodus.txt":  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-              "metadata.json":              "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+              "אוצריא/Tanakh/Genesis.txt": {"hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+              "אוצריא/Tanakh/Exodus.txt":  {"hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+              "metadata.json":             {"hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
             }
             """.trimIndent(),
         )
@@ -51,12 +51,12 @@ class SourceHashComputerTest {
         val rootA = tmp.newFolder().toPath()
         Files.writeString(
             rootA.resolve("files_manifest.json"),
-            """{"foo/A.txt": "1111111111111111111111111111111111111111111111111111111111111111"}""",
+            """{"foo/A.txt": {"hash": "1111111111111111111111111111111111111111111111111111111111111111"}}""",
         )
         val rootB = tmp.newFolder().toPath()
         Files.writeString(
             rootB.resolve("files_manifest.json"),
-            """{"foo/A.txt": "2222222222222222222222222222222222222222222222222222222222222222"}""",
+            """{"foo/A.txt": {"hash": "2222222222222222222222222222222222222222222222222222222222222222"}}""",
         )
         val a = OtzariaSourceHashComputer().compute(rootA, 1)
         val b = OtzariaSourceHashComputer().compute(rootB, 2)
@@ -65,15 +65,96 @@ class SourceHashComputerTest {
     }
 
     @Test
+    fun `otzaria parses nested entry even with sibling fields and hash not first`() {
+        // Regression guard: the manifest is nested `{path: {"hash": ...}}`. The parser
+        // must find `hash` inside the object even when it is not the first key and other
+        // fields sit beside it — and must NOT read across into a sibling entry's object.
+        val dd = "d".repeat(64)
+        val ee = "e".repeat(64)
+        val root = tmp.newFolder().toPath()
+        Files.writeString(
+            root.resolve("files_manifest.json"),
+            """
+            {
+              "src/אוצריא/foo/A.txt": {"size": 123, "hash": "$dd"},
+              "src/אוצריא/foo/B.txt": {"hash": "$ee", "size": 9}
+            }
+            """.trimIndent(),
+        )
+        val out = OtzariaSourceHashComputer().compute(root, 1)
+        assertEquals(2, out.size)
+        assertEquals(0xdd.toByte(), out.getValue(BookKey("Otzaria", "A")).hash[0])
+        assertEquals(0xee.toByte(), out.getValue(BookKey("Otzaria", "B")).hash[0])
+    }
+
+    @Test
     fun `otzaria honors source resolver`() {
         val root = tmp.newFolder().toPath()
         Files.writeString(
             root.resolve("files_manifest.json"),
-            """{"foo/A.txt": "1111111111111111111111111111111111111111111111111111111111111111"}""",
+            """{"foo/A.txt": {"hash": "1111111111111111111111111111111111111111111111111111111111111111"}}""",
         )
         val out = OtzariaSourceHashComputer(sourceNameResolver = { "wikisourceToOtzaria" })
             .compute(root, 1)
         assertEquals(setOf(BookKey("wikisourceToOtzaria", "A")), out.keys)
+    }
+
+    @Test
+    fun `otzaria applies title normalizer so key matches importer`() {
+        // The importer stores `normalizeBookTitle(filename)`; the computer must too, or
+        // peekBookId misses these books and their delta detection silently breaks.
+        val root = tmp.newFolder().toPath()
+        val h = "1".repeat(64)
+        Files.writeString(
+            root.resolve("files_manifest.json"),
+            """
+            {
+              "src/אוצריא/foo/פעמוני זהב .txt": {"hash": "$h"},
+              "src/אוצריא/foo/מהרי''ק.txt": {"hash": "$h"}
+            }
+            """.trimIndent(),
+        )
+        // Stand-in for the importer's normalizeBookTitle: trim + `''`→`״`.
+        val normalizer: (String) -> String = { it.trim().replace("''", "״") }
+        val out = OtzariaSourceHashComputer(titleNormalizer = normalizer).compute(root, 1)
+        assertEquals(
+            setOf(BookKey("Otzaria", "פעמוני זהב"), BookKey("Otzaria", "מהרי״ק")),
+            out.keys,
+        )
+    }
+
+    @Test
+    fun `otzaria resolves source from the manifest key prefix, not Unknown`() {
+        // Regression guard for the real-manifest shape: keys carry a source prefix before
+        // "אוצריא". The resolver must read that prefix (like the importer's manifestSourcesByRel),
+        // NOT relativize a Path — otherwise every book collapses to "Unknown" and the
+        // BookKey never matches the allocator (delta becomes a silent no-op).
+        val root = tmp.newFolder().toPath()
+        val h = "1".repeat(64)
+        Files.writeString(
+            root.resolve("files_manifest.json"),
+            """
+            {
+              "metadata.json": {"hash": "$h"},
+              "DictaToOtzaria/ערוך/ספרים/אוצריא/משנה/אחרונים/אור הישר.txt": {"hash": "$h"},
+              "MoreBooks/ x /אוצריא/פוסקים/חזון איש.txt": {"hash": "$h"}
+            }
+            """.trimIndent(),
+        )
+        // Mirrors Generator.sourceNameForManifestKey: source = first segment before "אוצריא".
+        val resolver: (String) -> String = { key ->
+            val parts = key.split('/')
+            val idx = parts.indexOf("אוצריא")
+            if (idx > 0) parts.first() else "Unknown"
+        }
+        val out = OtzariaSourceHashComputer(sourceNameResolver = resolver).compute(root, 1)
+        assertEquals(
+            setOf(
+                BookKey("DictaToOtzaria", "אור הישר"),
+                BookKey("MoreBooks", "חזון איש"),
+            ),
+            out.keys,
+        )
     }
 
     // ─── Sefaria: walks json/<...>/merged.json and incorporates the schema file ───

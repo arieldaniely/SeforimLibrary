@@ -80,6 +80,16 @@ class InMemoryIdAllocator private constructor(
         }
     }
 
+    /**
+     * Raises [table]'s next-id counter to at least [minNext]. Required before allocating
+     * fresh ids into a DB that already holds rows ABOVE the persisted counter — Havrouta
+     * links are deleted+recreated each build with implicit rowids the allocator never
+     * sees, so a later allocator-based inserter (Phase-2 LINKER) would collide with them.
+     */
+    fun ensureCounterAtLeast(table: IdTable, minNext: Long) {
+        counters.getValue(table).updateAndGet { maxOf(it, minNext) }
+    }
+
     private val reusedCount: Map<IdTable, AtomicLong> =
         IdTable.values().associateWith { AtomicLong(0) }
     private val freshCount: Map<IdTable, AtomicLong> =

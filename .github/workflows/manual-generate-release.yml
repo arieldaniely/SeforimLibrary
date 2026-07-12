@@ -1,8 +1,11 @@
 name: Manual Generate + Pre-Release
 
 # End-to-end build pipeline: builds seforim.db from the latest Sefaria +
-# Otzaria sources, packages a split bundle, and publishes the lot as a
-# GitHub pre-release.
+# Otzaria sources, runs the LinkerToOtzaria relink serially against this
+# build's own lines snapshot and injects the resulting LINKER links, then
+# packages a split bundle and publishes the lot as a GitHub pre-release.
+# Serial by design: the release always ships a complete link set; a linker
+# failure fails the build loudly (requires the PIPELINE_TOKEN secret).
 #
 # From the second release onwards, the workflow produces a logarithmic
 # fan of delta patches against previous pre-releases at fixed offsets
@@ -219,14 +222,83 @@ jobs:
       # bounded; the indexing stays well within budget.
       - name: Generate Seforim Database
         run: |
+          # -PlinkerSidecar makes the Sefaria import dump the RefEntry→lineId sidecar
+          # this build's LINKER Phase-2 needs (see next step).
           ./gradlew generateSeforimDb \
             -PreleaseName=${{ steps.release_meta.outputs.release_tag }} \
             -PdbVersion=${{ steps.discover.outputs.db_version }} \
             -PinMemoryDb=false \
+            -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
             --no-daemon --stacktrace
           # catalog.pb is no longer produced; drop any stale copy so a dirty
           # self-hosted workspace can't smuggle it into the bundle or a patch.
           rm -f build/catalog.pb
+
+      # ─── Serial linker cycle: snapshot → relink → inject, all IN this build ───
+      # The linker's offsets are only valid against THIS build's cleaned line text, so the
+      # snapshot must be dumped first, the linker re-links exactly the books it changed
+      # (delta — minutes), and Phase-2 injects the fresh artifacts back into this same DB.
+      # The published release therefore always carries a COMPLETE link set (no one-cycle lag).
+      - name: Dump lines snapshot for the linker
+        run: |
+          set -euo pipefail
+          ./gradlew :packaging:dumpLines \
+            -PseforimDb=$PWD/build/seforim.db \
+            -PlinesSnapshot=$PWD/build/lines_snapshot.db \
+            --no-daemon --stacktrace
+          zstd -T0 -19 -f -o build/lines_snapshot.db.zst build/lines_snapshot.db
+          rm -f build/lines_snapshot.db
+
+      # Hand the snapshot to the relink run as a workflow artifact of THIS run —
+      # deterministic (no "latest release" race) and works before any release exists.
+      - name: Upload snapshot artifact for the relink run
+        uses: actions/upload-artifact@v4
+        with:
+          name: lines-snapshot
+          path: build/lines_snapshot.db.zst
+          retention-days: 7
+          if-no-files-found: error
+
+      # Trigger the incremental relink on LinkerToOtzaria against THIS snapshot and wait.
+      # Serial by design: the DB release depends on the relink succeeding — a linker
+      # failure fails this build loudly instead of shipping a DB with silent gaps.
+      # Cross-repo dispatch/watch/download needs PIPELINE_TOKEN (PAT), not GITHUB_TOKEN.
+      - name: Run LinkerToOtzaria relink on this snapshot (and wait)
+        id: relink
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
+            -f library_run_id=${{ github.run_id }}
+          # Runs register asynchronously; nothing else dispatches relink.yml concurrently
+          # (this workflow's concurrency group is the only trigger), so "newest" is ours.
+          sleep 20
+          RUN=$(gh run list -R Otzaria/LinkerToOtzaria -w relink.yml -L1 \
+            --json databaseId -q '.[0].databaseId')
+          echo "relink run: $RUN"
+          echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
+          gh run watch "$RUN" -R Otzaria/LinkerToOtzaria --exit-status
+
+      # Inject the artifacts the relink run just produced into THIS DB. Downloaded from
+      # that exact run (not "latest release") so the handshake is fully deterministic.
+      # -PlinkerStrict: in the serial cycle every source line must map and hash-match;
+      # any stale/unmapped source means broken lineage → fail the build.
+      - name: Apply LINKER links (Phase-2)
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf build/linker && mkdir -p build/linker
+          gh run download ${{ steps.relink.outputs.run_id }} -R Otzaria/LinkerToOtzaria \
+            -n linker-links -D build/linker
+          tar --use-compress-program=unzstd -xf build/linker/linker_links.zst -C build/linker
+          ./gradlew :sefariasqlite:generateLinkerLinks \
+            -PseforimDb=$PWD/build/seforim.db \
+            -PlinkerArtifacts=$PWD/build/linker/artifacts \
+            -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
+            -PlinkerStrict=true \
+            --no-daemon --stacktrace
 
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
       # The prev DB is reconstituted from the release's compressed seforim.db.zst.
@@ -292,6 +364,9 @@ jobs:
           # Future releases reconstitute the prev DB from this.
           cp build/seforim.db.zst "$STAGE/"
           cp build/seforim.db.buildstate "$STAGE/"
+          # Lines snapshot for the linker (lineage + manual/standalone relink runs;
+          # the serial cycle already handed it to relink as a workflow artifact).
+          cp build/lines_snapshot.db.zst "$STAGE/"
           # Patch fan (zero or more files; only present from release #2 on).
           if compgen -G "patches/patch-*.db.zst" > /dev/null; then
             cp patches/patch-*.db.zst "$STAGE/"

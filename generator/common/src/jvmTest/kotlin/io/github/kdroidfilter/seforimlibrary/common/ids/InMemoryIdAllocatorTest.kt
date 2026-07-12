@@ -33,6 +33,16 @@ class InMemoryIdAllocatorTest {
     }
 
     @Test
+    fun `ensureCounterAtLeast raises the next id but never lowers it`() {
+        val allocator = InMemoryIdAllocator.load(path = null)
+        allocator.ensureCounterAtLeast(IdTable.LINK, 100L)
+        assertEquals(100L, allocator.linkId(1L, 2L, 1L))   // fresh id starts at the floor
+        allocator.ensureCounterAtLeast(IdTable.LINK, 50L)  // lower floor is a no-op
+        assertEquals(101L, allocator.linkId(1L, 3L, 1L))
+        assertEquals(100L, allocator.linkId(1L, 2L, 1L))   // existing key untouched
+    }
+
+    @Test
     fun `same natural key returns same id across calls`() {
         val allocator = InMemoryIdAllocator.load(path = null)
         val first = allocator.bookId("Sefaria", "בראשית")

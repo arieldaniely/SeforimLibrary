@@ -72,6 +72,15 @@ enum class ConnectionType {
     MISHNAH_IN_TALMUD,
     RELATED,
     OTHER,
+
+    /**
+     * Citations detected by the Sefaria linker (LinkerToOtzaria). A one-directional
+     * forward citation layer: source = the citing line (anchor side=0 spans the whole
+     * citation phrase), target = the cited Sefaria ref. Appended last to keep existing
+     * ordinals — and therefore stable ids — unchanged. Excluded from the SOURCE virtual
+     * view (it is not a base/dependant relation). See LINKER_DELTA_PLAN.md.
+     */
+    LINKER,
     ;
 
     companion object {
@@ -98,6 +107,7 @@ enum class ConnectionType {
                 "parshanut" -> PARSHANUT
                 "mishnah_in_talmud" -> MISHNAH_IN_TALMUD
                 "related", "related_passage" -> RELATED
+                "linker" -> LINKER
                 "", "none" -> OTHER
                 else -> OTHER
             }

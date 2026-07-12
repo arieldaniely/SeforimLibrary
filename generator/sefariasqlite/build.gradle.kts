@@ -65,6 +65,11 @@ tasks.register<JavaExec>("generateSefariaSqlite") {
     if (project.hasProperty("inMemoryDb")) {
         systemProperty("inMemoryDb", project.property("inMemoryDb") as String)
     }
+    // When set, dump the linker sidecar during the Sefaria import (RefEntry → lineId),
+    // so the Phase-2 LINKER importer can run against this build. No effect when unset.
+    if (project.hasProperty("linkerSidecar")) {
+        systemProperty("linkerSidecarPath", project.property("linkerSidecar") as String)
+    }
 
     // Optional JVM tuning (similar to generator)
     jvmArgs = listOf(
@@ -96,6 +101,34 @@ tasks.register<JavaExec>("seedGenerations") {
     }
 
     jvmArgs = listOf("-Xmx512m")
+}
+
+// Phase-2 LINKER importer: resolve ref-based artifacts (LinkerToOtzaria) into clickable links.
+// Usage:
+//   ./gradlew :sefariasqlite:generateLinkerLinks -PseforimDb=/path/seforim.db \
+//       -PlinkerArtifacts=/unpacked/artifacts -PlinkerSidecar=/sidecar.tsv
+tasks.register<JavaExec>("generateLinkerLinks") {
+    group = "application"
+    description = "Resolve LinkerToOtzaria ref-based artifacts into LINKER links + word anchors."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.GenerateLinkerLinksKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        systemProperty("seforimDb", rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath)
+    }
+    for (p in listOf("linkerArtifacts", "linkerSidecar", "buildStatePath", "linkerStrict")) {
+        if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
+    }
+
+    // The two lineId↔(bookId,lineIndex) metadata maps for ≈5.9M lines need headroom; line
+    // `content` is fetched lazily (see GenerateLinkerLinks.kt), so this is metadata + batches only.
+    jvmArgs = listOf("-Xmx6g")
 }
 
 // Post-processing step to rename categories after all generation is complete

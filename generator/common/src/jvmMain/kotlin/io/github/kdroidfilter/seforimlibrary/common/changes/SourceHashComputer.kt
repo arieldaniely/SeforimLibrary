@@ -90,12 +90,27 @@ class SefariaSourceHashComputer(
  *
  * For the Phase-2 detector we don't need to mimic the importer's actual
  * source resolution; the manifest's sha256 already pinpoints exactly the
- * touched files. We always emit the file's title (filename minus extension)
- * as the natural key — the touched-book detector compares against the
- * BookKey stored by the importer at the previous build's snapshot.
+ * touched files. The natural key must match what the importer records, which
+ * is `(source-for-manifest-key, normalizeBookTitle(filename-minus-ext))` — so
+ * both the source name and the title are resolved through injected functions.
+ *
+ * [sourceNameResolver] receives the **raw manifest key** (e.g.
+ * `"DictaToOtzaria/…/אוצריא/…/X.txt"`) — NOT a filesystem Path — and must return
+ * the same source name the importer assigns to that book (the manifest key's
+ * source prefix, resolved through the importer's own `manifestSourcesByRel`).
+ * Passing a Path to the importer's `getSourceNameFor` does NOT work here: it
+ * relativizes against `libraryRoot` (which may be uninitialized this early, and
+ * in any case does not match a manifest key that carries a source prefix), so
+ * every book collapses to "Unknown" and its BookKey never matches the allocator.
+ *
+ * [titleNormalizer] MUST be the importer's `normalizeBookTitle`; the identity
+ * default is for tests only. Without it, books whose filename differs from its
+ * normalized title (trailing spaces, `''`→`״`, …) get a key the importer never
+ * records → `peekBookId` misses → their change detection silently breaks.
  */
 class OtzariaSourceHashComputer(
-    private val sourceNameResolver: (Path) -> String = { "Otzaria" },
+    private val sourceNameResolver: (String) -> String = { "Otzaria" },
+    private val titleNormalizer: (String) -> String = { it },
 ) : SourceHashComputer {
 
     override fun compute(root: Path, version: Int): Map<BookKey, BookSourceHash> {
@@ -103,15 +118,22 @@ class OtzariaSourceHashComputer(
         require(Files.isRegularFile(manifest)) { "Missing files_manifest.json under $root" }
 
         val text = Files.readString(manifest)
-        val regex = Regex(""""([^"\\]*\.(?:txt|json))"\s*:\s*"([0-9a-fA-F]{64})"""")
+        // files_manifest.json is NESTED: `"<path>": {"hash": "<sha256>"}` (verified against
+        // the real manifest — every entry is an object, never a bare string). The path key is
+        // followed by its object; we pull the `hash` field from within that single object.
+        // `[^{}]*?` keeps the match inside one object so it can't span into a sibling entry.
+        val regex = Regex(""""([^"\\]*\.(?:txt|json))"\s*:\s*\{[^{}]*?"hash"\s*:\s*"([0-9a-fA-F]{64})"""")
         val out = HashMap<BookKey, BookSourceHash>()
         regex.findAll(text).forEach { m ->
             val relPath = m.groupValues[1]
             val sha256Hex = m.groupValues[2]
             if (!relPath.endsWith(".txt")) return@forEach
-            val title = relPath.substringAfterLast('/').substringBeforeLast('.')
+            val rawTitle = relPath.substringAfterLast('/').substringBeforeLast('.')
+            // Normalize identically to the importer (`normalizeBookTitle(rawTitle)`) so the
+            // BookKey matches what it records — see the injected [titleNormalizer].
+            val title = titleNormalizer(rawTitle)
             if (title.isBlank()) return@forEach
-            val source = sourceNameResolver(root.resolve(relPath))
+            val source = sourceNameResolver(relPath)
             val hash = ByteArray(32) { i ->
                 val hi = Character.digit(sha256Hex[i * 2], 16)
                 val lo = Character.digit(sha256Hex[i * 2 + 1], 16)

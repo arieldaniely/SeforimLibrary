@@ -20,6 +20,7 @@ kotlin {
             implementation(project(":generator-common"))
             implementation(libs.zstd)
             implementation(libs.commons.compress)
+            implementation(libs.sqlite.jdbc)
         }
     }
 }
@@ -53,6 +54,37 @@ tasks.register<JavaExec>("writeReleaseInfo") {
     }
 
     jvmArgs = listOf("-Xmx256m")
+}
+
+// Dump a built seforim.db into a compact lines snapshot for the external linker.
+// Usage:
+//   ./gradlew :packaging:dumpLines -PseforimDb=/path/to/seforim.db
+//   ./gradlew :packaging:dumpLines -PseforimDb=/path/to/seforim.db -PlinesSnapshot=/out/lines_snapshot.db
+//   ./gradlew :packaging:dumpLines -PseforimDb=/path/to/seforim.db -PlinesSnapshotBookLimit=50
+tasks.register<JavaExec>("dumpLines") {
+    group = "application"
+    description = "Dump seforim.db lines into lines_snapshot.db (book_key + line_index + content) for the linker."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.DumpLinesKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+        systemProperty("seforimDb", defaultDbPath)
+    }
+    if (project.hasProperty("linesSnapshot")) {
+        systemProperty("linesSnapshot", project.property("linesSnapshot") as String)
+    }
+    if (project.hasProperty("linesSnapshotBookLimit")) {
+        systemProperty("linesSnapshotBookLimit", project.property("linesSnapshotBookLimit") as String)
+    }
+
+    jvmArgs = listOf("-Xmx1g")
 }
 
 // Download lexical.db (from latest SeforimMagicIndexer release) next to seforim.db

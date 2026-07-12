@@ -426,6 +426,13 @@ class SefariaDirectImporter(
             }
         }
 
+        // Linker sidecar (stage 5): when -DlinkerSidecarPath is set, dump every RefEntry with
+        // its resolved lineId so the LINKER Phase-2 importer can rebuild refsByCanonical/
+        // refsByBase and map a resolved ref → lineId. Gated → zero effect on a normal build.
+        System.getProperty("linkerSidecarPath")?.let { sidecarPath ->
+            dumpLinkerSidecar(sidecarPath, allRefsWithPath, lineKeyToId)
+        }
+
         // Resolve deferred base_text_titles → bookIds now that every book has been
         // inserted and normalizedTitleToBookId is fully populated. This gives the
         // link orientation resolver explicit base→dependant edges instead of the
@@ -555,6 +562,33 @@ class SefariaDirectImporter(
  * mechanism (§4.5) in a later phase.
  */
 private fun canonicalHeTitle(payload: BookPayload): String = payload.heTitle
+
+/**
+ * Streams the linker sidecar: one TSV row per RefEntry — `ref \t heRef \t path \t
+ * lineIndex \t lineId`. The LINKER Phase-2 importer rebuilds `refsByCanonical`/`refsByBase`
+ * from (ref, heRef, path, lineIndex) with the SAME `canonicalCitation`, runs `resolveRefs`,
+ * then maps the resolved RefEntry's (path, lineIndex) → lineId via this file. Rows whose
+ * (path, lineIndex) has no id are skipped (they carry no resolvable target line).
+ * Refs/heRefs never contain tabs or newlines, so TSV is unambiguous.
+ */
+private fun dumpLinkerSidecar(
+    path: String,
+    refs: List<RefEntry>,
+    lineKeyToId: Map<Pair<String, Int>, Long>,
+) {
+    val file = java.io.File(path)
+    file.parentFile?.mkdirs()
+    file.bufferedWriter(Charsets.UTF_8).use { w ->
+        for (e in refs) {
+            // RefEntry.lineIndex is 1-based (= output.size at creation); lineKeyToId is keyed by
+            // the 0-based DB lineIndex — so translate with -1, exactly like SefariaLinksImporter.
+            val lineId = lineKeyToId[e.path to (e.lineIndex - 1)] ?: continue
+            w.append(e.ref).append('\t').append(e.heRef).append('\t')
+                .append(e.path).append('\t').append(e.lineIndex.toString()).append('\t')
+                .append(lineId.toString()).append('\n')
+        }
+    }
+}
 
 /**
  * Detects whether any line in the list contains teamim (cantillation marks) or nekudot (vowel points).

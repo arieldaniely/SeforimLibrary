@@ -237,3 +237,80 @@ internal fun resolveRefs(
     return emptyList()
 }
 
+/**
+ * Reconstructs the full end ref of a dashed citation ("exodus 29:43-44" → "exodus 29:44",
+ * "exodus 29:43-30:2" → "exodus 30:2", "berakhot 2a-2b" → "berakhot 2b"): the end part
+ * replaces the same number of trailing components it spells out. Null when there is no
+ * usable end part.
+ */
+internal fun rangeEndRef(rangeStart: String, canonical: String): String? {
+    val endPart = canonical.split('-', limit = 2).getOrNull(1)?.trim().orEmpty()
+    if (endPart.isBlank()) return null
+    if (endPart.contains(' ')) return canonicalCitation(endPart)
+    val endComponents = endPart.split(':')
+    if (rangeStart.contains(':')) {
+        val startComponents = rangeStart.split(':')
+        if (endComponents.size >= startComponents.size) {
+            // The end spells out the full address ("29:43-30:2") — the book name
+            // still lives in component 0 of the start ("exodus 29"); keep it.
+            val lastSpace = startComponents.first().lastIndexOf(' ')
+            if (lastSpace < 0) return canonicalCitation(endPart)
+            return canonicalCitation(
+                startComponents.first().substring(0, lastSpace + 1) + endPart
+            )
+        }
+        return canonicalCitation(
+            (startComponents.dropLast(endComponents.size) + endComponents).joinToString(":")
+        )
+    }
+    val lastSpace = rangeStart.lastIndexOf(' ')
+    if (lastSpace < 0) return null
+    return canonicalCitation(rangeStart.substring(0, lastSpace + 1) + endPart)
+}
+
+/**
+ * The LAST segment of the scope [citation] denotes, or null when it names a single exact
+ * segment. Mirrors [resolveRefs]' branch order — whichever branch resolves the start also
+ * fixes the scope: an exact canonical hit is one segment (no range); a dashed citation ends
+ * at its reconstructed end ref (itself section-level → that base's last entry); a base /
+ * ":1"-completion fallback covers the whole base, so its scope ends at [lastByBase]'s entry.
+ * [lastByBase] must be built like refsByBase but keeping the HIGHEST lineIndex per base.
+ * Callers must still validate same-path and end>start before trusting the result.
+ */
+internal fun resolveRefEnd(
+    citation: String,
+    refsByCanonical: Map<String, List<RefEntry>>,
+    refsByBase: Map<String, RefEntry>,
+    lastByBase: Map<String, RefEntry>,
+): RefEntry? {
+    val canonical = canonicalCitation(citation)
+    if (refsByCanonical[canonical]?.isNotEmpty() == true) return null
+
+    val rangeStart = citationRangeStart(canonical)
+    if (rangeStart != null && rangeStart != canonical) {
+        val endRef = rangeEndRef(rangeStart, canonical) ?: return null
+        refsByCanonical[endRef]?.let { list ->
+            list.maxByOrNull { it.lineIndex }?.let { return it }
+        }
+        lastByBase[endRef]?.let { return it }
+        lastByBase[canonicalBase(endRef)]?.let { return it }
+        return null
+    }
+
+    if (canonical.count { it == ':' } == 1) {
+        val canonicalWithOne = "$canonical:1"
+        if (refsByCanonical[canonicalWithOne]?.isNotEmpty() == true ||
+            refsByBase[canonicalBase(canonicalWithOne)] != null
+        ) {
+            return lastByBase[canonicalBase(canonicalWithOne)]
+        }
+    }
+
+    refsByBase[canonicalBase(canonical)]?.let { return lastByBase[canonicalBase(canonical)] }
+    if (!canonical.contains(":")) {
+        val baseWithOne = canonicalBase("$canonical 1")
+        refsByBase[baseWithOne]?.let { return lastByBase[baseWithOne] }
+    }
+    return null
+}
+
