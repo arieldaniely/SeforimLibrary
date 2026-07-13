@@ -57,15 +57,15 @@ jobs:
           haskell: true
           large-packages: true
           docker-images: false
-          swap-storage: false
+          swap-storage: true
 
-      - name: Bridle daemon heaps + generator forks for the 16 GB runner
+      - name: Bridle daemon heaps + generator forks for the 7 GB runner
         run: |
           mkdir -p ~/.gradle
           cat >> ~/.gradle/gradle.properties <<EOF
-          org.gradle.jvmargs=-Xmx3g
+          org.gradle.jvmargs=-Xmx2g
           kotlin.compiler.execution.strategy=in-process
-          generatorHeap=8g
+          generatorHeap=3g
           EOF
 
       - name: Install JBR 25
