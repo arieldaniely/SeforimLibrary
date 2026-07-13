@@ -51,7 +51,7 @@ concurrency:
 jobs:
   build-and-release:
     name: Build seforim.db + bundle + delta fan, publish pre-release
-    runs-on: ${{ inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]') }}
+    runs-on: ${{ inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || 'ubuntu-24.04-arm' }}
     timeout-minutes: 360
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
