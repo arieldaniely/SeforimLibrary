@@ -46,6 +46,9 @@ interface TextIndexWriter : AutoCloseable {
         term: String
     )
 
+    /** Removes every text/title document belonging to [bookId]. */
+    fun deleteBookById(bookId: Long) { /* default no-op */ }
+
     /**
      * Removes the line document whose stored `line_id` matches [lineId].
      * Default no-op for non-line stores. Used by the delta-update client

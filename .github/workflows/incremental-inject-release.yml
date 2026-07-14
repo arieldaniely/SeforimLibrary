@@ -4,7 +4,7 @@ name: Incremental Inject + Release
 #   1. restore the latest published DB bundle,
 #   2. append only currently-allowed Sefaria books missing from that DB,
 #   3. run the existing Otzaria append phases,
-#   4. rebuild derived catalog/index artifacts and publish a verified delta.
+#   4. append the new books to the bundled Lucene indexes and publish.
 
 on:
   workflow_dispatch:
@@ -100,7 +100,7 @@ jobs:
       - name: Download seed release database
         run: |
           set -euo pipefail
-          mkdir -p seed-assets seed-extract build seed-db
+          mkdir -p seed-assets seed-extract build
           gh release download '${{ steps.versions.outputs.seed_tag }}' \
             --repo "$SEED_REPOSITORY" \
             --pattern 'seforim_bundle.tar.zst.part*' \
@@ -112,10 +112,9 @@ jobs:
           test -s seed-extract/seforim.db
           cp -a seed-extract/. build/
           cp seed-assets/seforim.db.buildstate build/seforim.db.buildstate
-          cp --reflink=auto --sparse=always build/seforim.db seed-db/seforim.db
           rm -rf seed-extract seed-assets
           echo "Restored seed database:"
-          ls -lh build/seforim.db build/seforim.db.buildstate seed-db/seforim.db
+          ls -lh build/seforim.db build/seforim.db.buildstate
           df -h /
 
       - name: Record seed database counts
@@ -124,6 +123,7 @@ jobs:
           set -euo pipefail
           BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
           LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
+          sqlite3 build/seforim.db 'SELECT id FROM book ORDER BY id;' > seed-book-ids.txt
           echo "books=$BOOKS" >> "$GITHUB_OUTPUT"
           echo "lines=$LINES" >> "$GITHUB_OUTPUT"
           echo "Seed counts: books=$BOOKS lines=$LINES"
@@ -161,21 +161,25 @@ jobs:
           test "$(sqlite3 build/seforim.db 'PRAGMA integrity_check;')" = "ok"
           FK_ERRORS=$(sqlite3 build/seforim.db 'PRAGMA foreign_key_check;' | head -n 1)
           test -z "$FK_ERRORS" || { echo "::error::Foreign-key violation: $FK_ERRORS"; exit 1; }
+          sqlite3 build/seforim.db 'SELECT id FROM book ORDER BY id;' \
+            | grep -Fvx -f seed-book-ids.txt > new-book-ids.txt
+          NEW_BOOKS=$(wc -l < new-book-ids.txt)
+          test "$NEW_BOOKS" -gt 0
+          echo "Books to add to Lucene: $NEW_BOOKS"
           echo "Injected counts: books=$AFTER_BOOKS lines=$AFTER_LINES"
 
-      - name: Rebuild catalog and Lucene indexes from the updated DB
+      - name: Rebuild catalog and append new books to Lucene
         run: |
           set -euo pipefail
-          rm -rf build/seforim.db.lucene build/seforim.db.lookup.lucene
           rm -f build/catalog.pb
           ./gradlew :catalog:buildCatalog \
             -PseforimDb="$PWD/build/seforim.db" \
             --no-daemon --stacktrace
-          ./gradlew :searchindex:buildLuceneIndexDefault \
+          ./gradlew :searchindex:appendLuceneIndexDefault \
             -PseforimDb="$PWD/build/seforim.db" \
-            -PinMemoryDb=false \
-            -PindexThreads=2 \
-            -PgeneratorHeap=5g \
+            -PbookIdsFile="$PWD/new-book-ids.txt" \
+            -PindexThreads=1 \
+            -PgeneratorHeap=2g \
             --no-daemon --stacktrace
 
       - name: Stamp version and write release metadata
@@ -188,27 +192,13 @@ jobs:
             -PreleaseName='${{ steps.versions.outputs.release_tag }}' \
             --no-daemon --stacktrace
 
-      - name: Produce and verify delta from the seed release
-        run: |
-          mkdir -p patches
-          ./gradlew :generator-common:producePatchAndVerify \
-            -PprevDb="$PWD/seed-db/seforim.db" \
-            -PnewDb="$PWD/build/seforim.db" \
-            -Pout="$PWD/patches/patch-v${{ steps.versions.outputs.seed_version }}-v${{ steps.versions.outputs.next_version }}.db" \
-            -PcatalogPb="$PWD/build/catalog.pb" \
-            -PfromVersion='${{ steps.versions.outputs.seed_version }}' \
-            -PtoVersion='${{ steps.versions.outputs.next_version }}' \
-            -PgeneratorHeap=5g \
-            --no-daemon --stacktrace
-          rm -f patches/*.db patches/verify-*.db
-          rm -rf seed-db
-
       - name: Package updated database bundle
         run: |
           ./gradlew :packaging:packageArtifacts \
             -PseforimDb="$PWD/build/seforim.db" \
             -PbundleOutput="$PWD/build/package/seforim_bundle.tar.zst" \
-            -PzstdLevel=19 \
+            -PzstdLevel=10 \
+            -PzstdWorkers=1 \
             --no-daemon --stacktrace
 
       - name: Stage and validate release assets
@@ -218,7 +208,6 @@ jobs:
           cp build/package/seforim_bundle.tar.zst.part* release-staging/
           cp build/seforim.db.buildstate release-staging/
           cp build/catalog.pb release-staging/
-          cp patches/*.db.zst patches/*.db.zst.manifest.json release-staging/
           test -n "$(find release-staging -maxdepth 1 -type f -print -quit)"
           OVER=$(find release-staging -maxdepth 1 -type f -size +2147483647c -print)
           test -z "$OVER" || { echo "::error::Release assets exceed GitHub's 2 GiB limit: $OVER"; exit 1; }
