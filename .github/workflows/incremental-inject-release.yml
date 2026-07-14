@@ -1,0 +1,258 @@
+name: Incremental Inject + Release
+
+# Resource-bounded release path:
+#   1. restore the latest published DB bundle,
+#   2. append only currently-allowed Sefaria books missing from that DB,
+#   3. run the existing Otzaria append phases,
+#   4. rebuild derived catalog/index artifacts and publish a verified delta.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: Repository that owns the seed database release
+        required: true
+        default: kdroidFilter/SeforimLibrary
+        type: string
+      source_tag:
+        description: Seed release tag (empty means latest stable release)
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: Publish the rebuilt database as a pre-release
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: seforim-incremental-release
+  cancel-in-progress: false
+
+jobs:
+  inject-and-release:
+    name: Restore DB, inject missing books, rebuild and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SEED_REPOSITORY: ${{ inputs.source_repository }}
+      # Keep the Gradle process small; generators run in their own bounded JVMs.
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx1g -Dkotlin.compiler.execution.strategy=in-process
+
+    steps:
+      - name: Checkout SeforimLibrary
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free runner disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install database workflow tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq sqlite3 zstd
+          chmod +x gradlew
+
+      - name: Resolve seed and new release versions
+        id: versions
+        run: |
+          set -euo pipefail
+          SEED_TAG='${{ inputs.source_tag }}'
+          if [ -z "$SEED_TAG" ]; then
+            SEED_TAG=$(gh release view --repo "$SEED_REPOSITORY" --json tagName --jq .tagName)
+          fi
+          if [[ "$SEED_TAG" =~ ^v([0-9]+)- ]]; then
+            SEED_VERSION="${BASH_REMATCH[1]}"
+          else
+            echo "::error::Seed tag '$SEED_TAG' does not match v<dbVersion>-<timestamp>."
+            exit 1
+          fi
+          NEXT_VERSION=$((SEED_VERSION + 1))
+          RELEASE_TAG="v${NEXT_VERSION}-$(date -u +'%Y%m%d%H%M%S')"
+          echo "seed_tag=$SEED_TAG" >> "$GITHUB_OUTPUT"
+          echo "seed_version=$SEED_VERSION" >> "$GITHUB_OUTPUT"
+          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Seed: $SEED_REPOSITORY@$SEED_TAG (v$SEED_VERSION); output: $RELEASE_TAG"
+
+      - name: Download seed release database
+        run: |
+          set -euo pipefail
+          mkdir -p seed-assets seed-extract build seed-db
+          gh release download '${{ steps.versions.outputs.seed_tag }}' \
+            --repo "$SEED_REPOSITORY" \
+            --pattern 'seforim_bundle.tar.zst.part*' \
+            --pattern 'seforim.db.buildstate' \
+            --dir seed-assets
+          test -s seed-assets/seforim.db.buildstate
+          cat seed-assets/seforim_bundle.tar.zst.part* > seed-assets/seforim_bundle.tar.zst
+          tar --use-compress-program=unzstd -xf seed-assets/seforim_bundle.tar.zst -C seed-extract
+          test -s seed-extract/seforim.db
+          cp -a seed-extract/. build/
+          cp seed-assets/seforim.db.buildstate build/seforim.db.buildstate
+          cp --reflink=auto --sparse=always build/seforim.db seed-db/seforim.db
+          rm -rf seed-extract seed-assets
+          echo "Restored seed database:"
+          ls -lh build/seforim.db build/seforim.db.buildstate seed-db/seforim.db
+          df -h /
+
+      - name: Record seed database counts
+        id: seed_counts
+        run: |
+          set -euo pipefail
+          BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
+          LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
+          echo "books=$BOOKS" >> "$GITHUB_OUTPUT"
+          echo "lines=$LINES" >> "$GITHUB_OUTPUT"
+          echo "Seed counts: books=$BOOKS lines=$LINES"
+
+      - name: Inject missing Sefaria books
+        run: |
+          ./gradlew :sefariasqlite:appendMissingSefaria \
+            -PseforimDb="$PWD/build/seforim.db" \
+            -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
+            -PbuildVersion='${{ steps.versions.outputs.next_version }}' \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+
+      - name: Inject currently allowed Otzaria books and links
+        run: |
+          ./gradlew :otzariasqlite:appendOtzaria \
+            :otzariasqlite:generateHavroutaLinks \
+            -PseforimDb="$PWD/build/seforim.db" \
+            -PinMemoryDb=false \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+
+      - name: Normalize categories and verify injected database
+        run: |
+          set -euo pipefail
+          ./gradlew :sefariasqlite:renameCategories \
+            -PseforimDb="$PWD/build/seforim.db" \
+            --no-daemon --stacktrace
+          AFTER_BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
+          AFTER_LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
+          if [ "$AFTER_BOOKS" -le '${{ steps.seed_counts.outputs.books }}' ]; then
+            echo "::error::No books were added (before=${{ steps.seed_counts.outputs.books }}, after=$AFTER_BOOKS)."
+            exit 1
+          fi
+          test "$(sqlite3 build/seforim.db 'PRAGMA integrity_check;')" = "ok"
+          FK_ERRORS=$(sqlite3 build/seforim.db 'PRAGMA foreign_key_check;' | head -n 1)
+          test -z "$FK_ERRORS" || { echo "::error::Foreign-key violation: $FK_ERRORS"; exit 1; }
+          echo "Injected counts: books=$AFTER_BOOKS lines=$AFTER_LINES"
+
+      - name: Rebuild catalog and Lucene indexes from the updated DB
+        run: |
+          set -euo pipefail
+          rm -rf build/seforim.db.lucene build/seforim.db.lookup.lucene
+          rm -f build/catalog.pb
+          ./gradlew :catalog:buildCatalog \
+            -PseforimDb="$PWD/build/seforim.db" \
+            --no-daemon --stacktrace
+          ./gradlew :searchindex:buildLuceneIndexDefault \
+            -PseforimDb="$PWD/build/seforim.db" \
+            -PinMemoryDb=false \
+            -PindexThreads=2 \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+
+      - name: Stamp version and write release metadata
+        run: |
+          ./gradlew :generator-common:stampSchemaVersion \
+            :packaging:writeReleaseInfo \
+            -PdbPath="$PWD/build/seforim.db" \
+            -PseforimDb="$PWD/build/seforim.db" \
+            -PdbVersion='${{ steps.versions.outputs.next_version }}' \
+            -PreleaseName='${{ steps.versions.outputs.release_tag }}' \
+            --no-daemon --stacktrace
+
+      - name: Produce and verify delta from the seed release
+        run: |
+          mkdir -p patches
+          ./gradlew :generator-common:producePatchAndVerify \
+            -PprevDb="$PWD/seed-db/seforim.db" \
+            -PnewDb="$PWD/build/seforim.db" \
+            -Pout="$PWD/patches/patch-v${{ steps.versions.outputs.seed_version }}-v${{ steps.versions.outputs.next_version }}.db" \
+            -PcatalogPb="$PWD/build/catalog.pb" \
+            -PfromVersion='${{ steps.versions.outputs.seed_version }}' \
+            -PtoVersion='${{ steps.versions.outputs.next_version }}' \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+          rm -f patches/*.db patches/verify-*.db
+          rm -rf seed-db
+
+      - name: Package updated database bundle
+        run: |
+          ./gradlew :packaging:packageArtifacts \
+            -PseforimDb="$PWD/build/seforim.db" \
+            -PbundleOutput="$PWD/build/package/seforim_bundle.tar.zst" \
+            -PzstdLevel=19 \
+            --no-daemon --stacktrace
+
+      - name: Stage and validate release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-staging
+          cp build/package/seforim_bundle.tar.zst.part* release-staging/
+          cp build/seforim.db.buildstate release-staging/
+          cp build/catalog.pb release-staging/
+          cp patches/*.db.zst patches/*.db.zst.manifest.json release-staging/
+          test -n "$(find release-staging -maxdepth 1 -type f -print -quit)"
+          OVER=$(find release-staging -maxdepth 1 -type f -size +2147483647c -print)
+          test -z "$OVER" || { echo "::error::Release assets exceed GitHub's 2 GiB limit: $OVER"; exit 1; }
+          ls -lh release-staging
+
+      - name: Publish rebuilt database release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.versions.outputs.release_tag }}
+          name: ${{ steps.versions.outputs.release_tag }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: release-staging/*
+
+      - name: Refresh release manifest on master
+        run: |
+          set -euo pipefail
+          if LATEST=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null); then
+            LATEST_ARGS=(--argjson latest "$LATEST")
+          else
+            LATEST_ARGS=(--argjson latest null)
+          fi
+          RELEASES=$(gh release list --json tagName,name,publishedAt --limit 100)
+          jq -n \
+            --arg generatedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            "${LATEST_ARGS[@]}" \
+            --argjson releases "$RELEASES" \
+            '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
+            > release-manifest.json
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add release-manifest.json
+          if ! git diff --staged --quiet; then
+            git commit -m 'Update release manifest [skip ci]'
+            git pull --rebase origin master
+            git push origin HEAD:master
+          fi

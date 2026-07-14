@@ -49,17 +49,70 @@ internal class SefariaBookPayloadReader(
     }
 
     /**
-     * Read and parse book files in parallel using coroutines.
+     * Finds merged book payloads, optionally excluding books whose normalized
+     * Hebrew/English schema title is already present in a seed database.
+     *
+     * The exclusion check reads only the small schema JSON. It deliberately
+     * avoids parsing the much larger merged.json for existing books, which is
+     * what keeps an incremental release append within GitHub runner memory.
      */
-    suspend fun readBooksInParallel(
+    fun findMergedFiles(
         jsonDir: Path,
         schemaDir: Path,
-        schemaLookup: Map<String, Path>
-    ): List<BookPayload> = coroutineScope {
+        schemaLookup: Map<String, Path>,
+        excludedTitleKeys: Set<String> = emptySet(),
+    ): List<Path> {
         val mergedFiles = Files.walk(jsonDir).use { stream ->
             stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
                 .toList()
         }
+
+        if (excludedTitleKeys.isEmpty()) return mergedFiles
+
+        val excludedBySchema = ConcurrentHashMap<Path, Boolean>()
+        val filtered = mergedFiles.filterNot { textPath ->
+            val folderName = textPath.parent?.fileName?.name ?: return@filterNot false
+            val schemaPath = resolveSchemaPath(
+                title = null,
+                heTitle = null,
+                folderName = folderName,
+                schemaDir = schemaDir,
+                lookup = schemaLookup,
+            ) ?: return@filterNot false
+            excludedBySchema.computeIfAbsent(schemaPath) { path ->
+                runCatching {
+                    val schemaJson = json.parseToJsonElement(path.readText()).jsonObject
+                    val schemaObj = schemaJson["schema"]?.jsonObject ?: return@runCatching false
+                    listOf(
+                        schemaObj["title"]?.stringOrNull(),
+                        schemaObj["heTitle"]?.stringOrNull(),
+                    ).any { title -> normalizeTitleKey(title)?.let(excludedTitleKeys::contains) == true }
+                }.getOrDefault(false)
+            }
+        }
+        logger.i {
+            "Incremental title filter retained ${filtered.size}/${mergedFiles.size} merged.json files"
+        }
+        return filtered
+    }
+
+    /** Read and parse book files in parallel using coroutines. */
+    suspend fun readBooksInParallel(
+        jsonDir: Path,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+        excludedTitleKeys: Set<String> = emptySet(),
+    ): List<BookPayload> = readBooksInParallel(
+        mergedFiles = findMergedFiles(jsonDir, schemaDir, schemaLookup, excludedTitleKeys),
+        schemaDir = schemaDir,
+        schemaLookup = schemaLookup,
+    )
+
+    suspend fun readBooksInParallel(
+        mergedFiles: Collection<Path>,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+    ): List<BookPayload> = coroutineScope {
 
         logger.i { "Found ${mergedFiles.size} merged.json files to process" }
 

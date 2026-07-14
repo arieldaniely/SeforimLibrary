@@ -2506,6 +2506,17 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     }
 
     /**
+     * Returns the stable id and Hebrew title of every book without loading
+     * authors/topics/publication metadata. Intended for incremental importers
+     * that only need a lightweight existence index.
+     */
+    suspend fun getAllBookIdsAndTitles(): List<Pair<Long, String>> = withContext(Dispatchers.IO) {
+        database.bookQueriesQueries.selectAll().executeAsList().map { row ->
+            row.id to row.title
+        }
+    }
+
+    /**
      * Returns the IDs of all base books (isBaseBook = 1).
      */
     suspend fun getBaseBookIds(): List<Long> = withContext(Dispatchers.IO) {

@@ -202,8 +202,12 @@ tasks.register<JavaExec>("appendOtzariaLines") {
     }
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
-    // Use in-memory DB for speed; seed from baseDb; persist to persistDb (can equal baseDb)
-    args(":memory:")
+    // Keep the historical in-memory default for local generation, but allow
+    // resource-constrained CI to append directly to the existing file with
+    // -PinMemoryDb=false (avoids cloning the multi-GB seed DB into RAM).
+    val useMemoryDb = (project.findProperty("inMemoryDb") as String?)?.toBooleanStrictOrNull() ?: true
+    args(if (useMemoryDb) ":memory:" else baseDb)
+    systemProperty("inMemoryDb", useMemoryDb.toString())
     systemProperty("appendExistingDb", "true")
     systemProperty("baseDb", baseDb)
     systemProperty("persistDb", persistDb)
@@ -245,7 +249,9 @@ tasks.register<JavaExec>("appendOtzariaLinks") {
     }
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
-    args(":memory:")
+    val useMemoryDb = (project.findProperty("inMemoryDb") as String?)?.toBooleanStrictOrNull() ?: true
+    args(if (useMemoryDb) ":memory:" else persistDb)
+    systemProperty("inMemoryDb", useMemoryDb.toString())
     systemProperty("baseDb", persistDb)
     systemProperty("persistDb", persistDb)
 
