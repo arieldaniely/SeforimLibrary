@@ -119,10 +119,26 @@ jobs:
           set -euo pipefail
           ZIP=build/incremental-sefaria-otzaria.zip
           test -s "$ZIP"
-          unzip -t "$ZIP"
+          unzip -t "$ZIP" >/dev/null
           TXT_COUNT=$(unzip -Z1 "$ZIP" | awk '/^אוצריא\/.*\.txt$/ { count++ } END { print count+0 }')
           LINK_COUNT=$(unzip -Z1 "$ZIP" | awk '/^links\/.*_links\.json$/ { count++ } END { print count+0 }')
+          # Info-ZIP can render UTF-8 Hebrew entry names through a legacy code
+          # page. Count the generated source tree instead of trusting that
+          # rendered listing, and require every text to be inside a category.
+          ROOT=build/incremental-sefaria-otzaria
+          test -s "$ROOT/metadata.json"
+          test -s "$ROOT/files_manifest.json"
+          TEXT_ROOT=$(find "$ROOT" -mindepth 1 -maxdepth 1 -type d ! -name links -print -quit)
+          test -n "$TEXT_ROOT" || { echo "::error::Otzaria text root is missing."; exit 1; }
+          TXT_COUNT=$(find "$TEXT_ROOT" -mindepth 2 -type f -name '*.txt' | wc -l)
+          ROOT_TEXT_COUNT=$(find "$TEXT_ROOT" -maxdepth 1 -type f -name '*.txt' | wc -l)
+          if [ -d "$ROOT/links" ]; then
+            LINK_COUNT=$(find "$ROOT/links" -type f -name '*_links.json' | wc -l)
+          else
+            LINK_COUNT=0
+          fi
           test "$TXT_COUNT" -gt 0 || { echo "::error::No newly allowed Sefaria books were found."; exit 1; }
+          test "$ROOT_TEXT_COUNT" -eq 0 || { echo "::error::Some books were not placed in category folders."; exit 1; }
           echo "Exported books=$TXT_COUNT link-files=$LINK_COUNT"
           unzip -l "$ZIP" | tail -n 20
 
