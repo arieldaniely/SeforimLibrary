@@ -35,6 +35,12 @@ fun main(args: Array<String>) = runBlocking {
         ?: System.getProperty("sourceDir")
         ?: System.getenv("OTZARIA_SOURCE_DIR")
         ?: OtzariaFetcher.ensureLocalSource(logger).toString()
+    val incrementalBookIds = (System.getProperty("newBookIdsFile")
+        ?: System.getenv("NEW_BOOK_IDS_FILE"))?.let { rawPath ->
+        val path = Paths.get(rawPath)
+        require(Files.isRegularFile(path)) { "New-book ID file not found at $path" }
+        Files.readAllLines(path).mapNotNull { it.trim().toLongOrNull() }.toSet()
+    }
 
     val jdbcUrl = if (useMemoryDb) "jdbc:sqlite::memory:" else "jdbc:sqlite:$dbPath"
     val driver = JdbcSqliteDriver(url = jdbcUrl)
@@ -98,6 +104,7 @@ fun main(args: Array<String>) = runBlocking {
             acronymDbPath = null,
             filterSourcesForLinks = false,
             allocator = allocator,
+            incrementalLinkBookIds = incrementalBookIds,
         )
         generator.generateLinksOnly()
         runCatching {

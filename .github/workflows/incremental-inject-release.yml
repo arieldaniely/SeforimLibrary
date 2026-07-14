@@ -142,6 +142,7 @@ jobs:
           ./gradlew :otzariasqlite:appendOtzaria \
             :otzariasqlite:generateHavroutaLinks \
             -PseforimDb="$PWD/build/seforim.db" \
+            -PnewBookIdsFile="$PWD/build/otzaria-new-book-ids.txt" \
             -PinMemoryDb=false \
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace

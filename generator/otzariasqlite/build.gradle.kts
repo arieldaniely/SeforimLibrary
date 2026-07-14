@@ -209,8 +209,12 @@ tasks.register<JavaExec>("appendOtzariaLines") {
     args(if (useMemoryDb) ":memory:" else baseDb)
     systemProperty("inMemoryDb", useMemoryDb.toString())
     systemProperty("appendExistingDb", "true")
+    systemProperty("onlyMissingBooks", "true")
     systemProperty("baseDb", baseDb)
     systemProperty("persistDb", persistDb)
+    val newBookIdsFile = (project.findProperty("newBookIdsFile") as String?)
+        ?: rootProject.layout.buildDirectory.file("otzaria-new-book-ids.txt").get().asFile.absolutePath
+    systemProperty("newBookIdsFile", newBookIdsFile)
 
     val defaultAcronymDb = layout.buildDirectory.file("acronymizer/acronymizer.db").get().asFile.absolutePath
     if (project.hasProperty("acronymDb")) {
@@ -254,6 +258,9 @@ tasks.register<JavaExec>("appendOtzariaLinks") {
     systemProperty("inMemoryDb", useMemoryDb.toString())
     systemProperty("baseDb", persistDb)
     systemProperty("persistDb", persistDb)
+    val newBookIdsFile = (project.findProperty("newBookIdsFile") as String?)
+        ?: rootProject.layout.buildDirectory.file("otzaria-new-book-ids.txt").get().asFile.absolutePath
+    systemProperty("newBookIdsFile", newBookIdsFile)
 
     if (project.hasProperty("sourceDir")) {
         systemProperty("sourceDir", project.property("sourceDir") as String)
@@ -291,6 +298,10 @@ tasks.register<JavaExec>("generateHavroutaLinks") {
         rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
     }
     args(defaultDbPath)
+
+    (project.findProperty("newBookIdsFile") as String?)?.let {
+        systemProperty("newBookIdsFile", it)
+    }
 
     // Bumped from 4g → 10g: the IdAllocator now loads a fully populated
     // id_lookup (author/topic/pub_place/pub_date/toc_text) on top of the

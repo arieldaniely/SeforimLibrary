@@ -2505,6 +2505,23 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         }
     }
 
+    /** Returns core rows for all books without per-book metadata queries. */
+    suspend fun getAllBooksCore(): List<Book> = withContext(Dispatchers.IO) {
+        database.bookQueriesQueries.selectAll().executeAsList().map { it.toModel(json) }
+    }
+
+    /**
+     * Returns `(bookId, Hebrew title, source name)` for incremental import
+     * selection without loading authors, topics, dates or publication places.
+     */
+    suspend fun getAllBookSourceIdentities(): List<Triple<Long, String, String>> = withContext(Dispatchers.IO) {
+        val sourceNames = database.sourceQueriesQueries.selectAll().executeAsList()
+            .associate { it.id to it.name }
+        database.bookQueriesQueries.selectAll().executeAsList().map { row ->
+            Triple(row.id, row.title, sourceNames[row.sourceId] ?: "Unknown")
+        }
+    }
+
     /**
      * Returns the stable id and Hebrew title of every book without loading
      * authors/topics/publication metadata. Intended for incremental importers
