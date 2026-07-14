@@ -96,6 +96,55 @@ internal class SefariaBookPayloadReader(
         return filtered
     }
 
+    /**
+     * Selects books that were blocked by a historical blacklist without reading
+     * their large merged text payloads. Current blacklists are applied after parsing.
+     */
+    fun findMergedFilesBlacklistedBy(
+        jsonDir: Path,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+        blacklists: SefariaBlacklists,
+    ): List<Path> {
+        val mergedFiles = findMergedFiles(jsonDir, schemaDir, schemaLookup)
+        val blockedBySchema = ConcurrentHashMap<Path, Boolean>()
+        val filtered = mergedFiles.filter { textPath ->
+            val folderName = textPath.parent?.fileName?.name ?: return@filter false
+            val schemaPath = resolveSchemaPath(
+                title = null,
+                heTitle = null,
+                folderName = folderName,
+                schemaDir = schemaDir,
+                lookup = schemaLookup,
+            ) ?: return@filter false
+            blockedBySchema.computeIfAbsent(schemaPath) { path ->
+                runCatching {
+                    val schemaJson = json.parseToJsonElement(path.readText()).jsonObject
+                    val schemaObj = schemaJson["schema"]?.jsonObject ?: return@runCatching false
+                    val enTitle = schemaObj["title"]?.stringOrNull().orEmpty()
+                    val heTitle = schemaObj["heTitle"]?.stringOrNull() ?: enTitle
+                    val categories = schemaJson["heCategories"]?.jsonArray
+                        ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                        ?: schemaObj["heCategories"]?.jsonArray
+                            ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                        ?: emptyList()
+                    val authors = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
+                        author.jsonObject["he"]?.stringOrNull()
+                    } ?: emptyList()
+                    isBookBlacklisted(heTitle, enTitle, categories, blacklists) ||
+                        isAuthorBlacklisted(authors, blacklists)
+                }.getOrElse { error ->
+                    logger.w(error) { "Unable to inspect historical blacklist candidate $path" }
+                    false
+                }
+            }
+        }
+        logger.i {
+            "Historical blacklist filter retained ${filtered.size}/${mergedFiles.size} merged.json files"
+        }
+        return filtered
+    }
+
     /** Read and parse book files in parallel using coroutines. */
     suspend fun readBooksInParallel(
         jsonDir: Path,

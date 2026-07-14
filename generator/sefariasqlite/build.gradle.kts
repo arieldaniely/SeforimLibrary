@@ -115,14 +115,15 @@ tasks.register<JavaExec>("appendMissingSefaria") {
     )
 }
 
-// Export the same currently-allowed, seed-missing Sefaria books without
-// constructing or modifying a database. The result is an Otzaria-compatible ZIP.
+// Export the Sefaria books newly allowed since historical blacklist files,
+// without constructing or modifying a database. A seed DB is the fallback.
 // Usage:
 //   ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
-//     -PseedDb=/path/to/seforim.db -PotzariaOutputZip=/path/to/books.zip
+//     -PbaselineAuthorsBlacklist=/tmp/authors.txt \
+//     -PbaselineBooksBlacklist=/tmp/books.txt -PotzariaOutputZip=/path/to/books.zip
 tasks.register<JavaExec>("exportIncrementalSefariaOtzaria") {
     group = "application"
-    description = "Export currently-allowed Sefaria books missing from a seed DB as an Otzaria ZIP."
+    description = "Export Sefaria books newly allowed since historical blacklists as an Otzaria ZIP."
 
     dependsOn("jvmJar")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.ExportIncrementalSefariaOtzariaKt")
@@ -136,11 +137,21 @@ tasks.register<JavaExec>("exportIncrementalSefariaOtzaria") {
     val outputZip = (project.findProperty("otzariaOutputZip") as String?)
         ?: rootProject.layout.buildDirectory.file("incremental-sefaria-otzaria.zip").get().asFile.absolutePath
 
+    val baselineAuthors = project.findProperty("baselineAuthorsBlacklist") as String?
+    val baselineBooks = project.findProperty("baselineBooksBlacklist") as String?
+
     systemProperty("seedDb", seedDb)
     systemProperty("outputDir", outputDir)
     systemProperty("outputZip", outputZip)
     if (project.hasProperty("exportDir")) {
         systemProperty("exportDir", project.property("exportDir") as String)
+    }
+
+    if (baselineAuthors != null) {
+        systemProperty("baselineAuthorsBlacklist", baselineAuthors)
+    }
+    if (baselineBooks != null) {
+        systemProperty("baselineBooksBlacklist", baselineBooks)
     }
 
     jvmArgs = listOf(

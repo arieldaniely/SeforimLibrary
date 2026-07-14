@@ -24,20 +24,21 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 /**
- * Exports the currently allowed Sefaria books that are absent from a seed DB
- * as an Otzaria-compatible ZIP. The seed is opened read-only and is never
- * copied or modified.
+ * Exports books that were blocked by historical Sefaria blacklists and are
+ * allowed by the current blacklists as an Otzaria-compatible ZIP. A read-only
+ * seed DB comparison remains available as a fallback for existing callers.
  */
 fun main() = runBlocking {
     Logger.setMinSeverity(Severity.Info)
     val logger = Logger.withTag("SefariaOtzariaExport")
 
-    val seedDb = Paths.get(
-        System.getProperty("seedDb")
-            ?: System.getenv("SEED_DB")
-            ?: Paths.get("build", "seforim.db").toString()
-    ).toAbsolutePath().normalize()
-    require(Files.isRegularFile(seedDb)) { "Seed database not found at $seedDb" }
+    val baselineAuthorsPath = (System.getProperty("baselineAuthorsBlacklist")
+        ?: System.getenv("BASELINE_AUTHORS_BLACKLIST"))?.let(Paths::get)?.toAbsolutePath()?.normalize()
+    val baselineBooksPath = (System.getProperty("baselineBooksBlacklist")
+        ?: System.getenv("BASELINE_BOOKS_BLACKLIST"))?.let(Paths::get)?.toAbsolutePath()?.normalize()
+    require((baselineAuthorsPath == null) == (baselineBooksPath == null)) {
+        "Both baselineAuthorsBlacklist and baselineBooksBlacklist must be provided together"
+    }
 
     val outputDir = Paths.get(
         System.getProperty("outputDir")
@@ -60,7 +61,6 @@ fun main() = runBlocking {
     val jsonDir = dbRoot.resolve("json")
     val schemaDir = dbRoot.resolve("schemas")
 
-    val existingTitleKeys = loadSeedTitleKeys(seedDb, logger)
     val json = Json {
         ignoreUnknownKeys = true
         coerceInputValues = true
@@ -69,18 +69,43 @@ fun main() = runBlocking {
     }
     val reader = SefariaBookPayloadReader(json, logger)
     val schemaLookup = reader.buildSchemaLookup(schemaDir)
-    val mergedFiles = reader.findMergedFiles(
-        jsonDir = jsonDir,
-        schemaDir = schemaDir,
-        schemaLookup = schemaLookup,
-        excludedTitleKeys = existingTitleKeys,
-    )
+    val mergedFiles = if (baselineAuthorsPath != null && baselineBooksPath != null) {
+        require(Files.isRegularFile(baselineAuthorsPath)) {
+            "Baseline authors blacklist not found at $baselineAuthorsPath"
+        }
+        require(Files.isRegularFile(baselineBooksPath)) {
+            "Baseline books blacklist not found at $baselineBooksPath"
+        }
+        val historicalBlacklists = loadSefariaBlacklists(baselineAuthorsPath, baselineBooksPath, logger)
+        logger.i { "Selecting books blocked by the historical blacklists" }
+        reader.findMergedFilesBlacklistedBy(
+            jsonDir = jsonDir,
+            schemaDir = schemaDir,
+            schemaLookup = schemaLookup,
+            blacklists = historicalBlacklists,
+        )
+    } else {
+        val seedDb = Paths.get(
+            System.getProperty("seedDb")
+                ?: System.getenv("SEED_DB")
+                ?: Paths.get("build", "seforim.db").toString()
+        ).toAbsolutePath().normalize()
+        require(Files.isRegularFile(seedDb)) { "Seed database not found at $seedDb" }
+        logger.i { "No baseline blacklists supplied; falling back to seed DB title comparison" }
+        reader.findMergedFiles(
+            jsonDir = jsonDir,
+            schemaDir = schemaDir,
+            schemaLookup = schemaLookup,
+            excludedTitleKeys = loadSeedTitleKeys(seedDb, logger),
+        )
+    }
 
     SefariaImageEmbedder.prefetch(mergedFiles, logger = logger)
     val candidates = reader.readBooksInParallel(mergedFiles, schemaDir, schemaLookup)
+    val currentBlacklists = loadSefariaBlacklists(SefariaOtzariaExporter::class.java.classLoader, logger)
     val filtered = filterBlacklistedPayloads(
         payloads = candidates,
-        blacklists = loadSefariaBlacklists(SefariaOtzariaExporter::class.java.classLoader, logger),
+        blacklists = currentBlacklists,
     )
     if (filtered.skippedTotal > 0) {
         logger.i {
