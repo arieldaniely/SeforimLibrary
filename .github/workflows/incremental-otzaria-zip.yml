@@ -1,0 +1,135 @@
+name: Incremental Sefaria to Otzaria ZIP
+
+# Read the latest published database as a baseline, then export only Sefaria
+# books allowed by the current blacklists and absent from that baseline.
+# The seed DB is opened read-only; this workflow never builds or modifies a DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: Repository that owns the seed database release
+        required: true
+        default: kdroidFilter/SeforimLibrary
+        type: string
+      source_tag:
+        description: Seed release tag (empty means latest stable release)
+        required: false
+        default: ""
+        type: string
+      retention_days:
+        description: Number of days to retain the generated artifact
+        required: false
+        default: 30
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seforim-incremental-otzaria-zip
+  cancel-in-progress: false
+
+jobs:
+  export:
+    name: Compare seed and export Otzaria ZIP
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SEED_REPOSITORY: ${{ inputs.source_repository }}
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx1g -Dkotlin.compiler.execution.strategy=in-process
+
+    steps:
+      - name: Checkout SeforimLibrary
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free runner disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unzip zstd
+          chmod +x gradlew
+
+      - name: Resolve seed version
+        id: versions
+        run: |
+          set -euo pipefail
+          SEED_TAG='${{ inputs.source_tag }}'
+          if [ -z "$SEED_TAG" ]; then
+            SEED_TAG=$(gh release view --repo "$SEED_REPOSITORY" --json tagName --jq .tagName)
+          fi
+          if [[ "$SEED_TAG" =~ ^v([0-9]+)- ]]; then
+            NEXT_VERSION=$((${BASH_REMATCH[1]} + 1))
+          else
+            echo "::error::Seed tag '$SEED_TAG' does not match v<dbVersion>-<timestamp>."
+            exit 1
+          fi
+          ARTIFACT_NAME="sefaria-otzaria-v${NEXT_VERSION}-$(date -u +'%Y%m%d%H%M%S')"
+          echo "seed_tag=$SEED_TAG" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Download read-only seed database
+        run: |
+          set -euo pipefail
+          mkdir -p seed-assets seed-extract build
+          gh release download '${{ steps.versions.outputs.seed_tag }}' \
+            --repo "$SEED_REPOSITORY" \
+            --pattern 'seforim_bundle.tar.zst.part*' \
+            --dir seed-assets
+          cat seed-assets/seforim_bundle.tar.zst.part* > seed-assets/seforim_bundle.tar.zst
+          tar --use-compress-program=unzstd -xf seed-assets/seforim_bundle.tar.zst -C seed-extract
+          test -s seed-extract/seforim.db
+          mv seed-extract/seforim.db build/seed-seforim.db
+          rm -rf seed-assets seed-extract
+          ls -lh build/seed-seforim.db
+
+      - name: Export missing Sefaria books in Otzaria format
+        run: |
+          ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
+            -PseedDb="$PWD/build/seed-seforim.db" \
+            -PotzariaOutputDir="$PWD/build/incremental-sefaria-otzaria" \
+            -PotzariaOutputZip="$PWD/build/incremental-sefaria-otzaria.zip" \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+
+      - name: Validate Otzaria ZIP
+        run: |
+          set -euo pipefail
+          ZIP=build/incremental-sefaria-otzaria.zip
+          test -s "$ZIP"
+          unzip -t "$ZIP"
+          TXT_COUNT=$(unzip -Z1 "$ZIP" | awk '/^אוצריא\/.*\.txt$/ { count++ } END { print count+0 }')
+          LINK_COUNT=$(unzip -Z1 "$ZIP" | awk '/^links\/.*_links\.json$/ { count++ } END { print count+0 }')
+          test "$TXT_COUNT" -gt 0 || { echo "::error::No newly allowed Sefaria books were found."; exit 1; }
+          echo "Exported books=$TXT_COUNT link-files=$LINK_COUNT"
+          unzip -l "$ZIP" | tail -n 20
+
+      - name: Upload Otzaria ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.versions.outputs.artifact_name }}
+          path: build/incremental-sefaria-otzaria.zip
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
