@@ -61,9 +61,11 @@ COPYRIGHT_IMPORT_VALIDATION_PATH="${6:-build/copyright-import-validation.json}"
     echo
     requested=$(jq '.requestedBooks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     downloaded=$(jq '.downloadedBooks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    download_errors=$(jq '.errors | length' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     versions=$(jq '.downloadedHebrewVersions' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     direct_links=$(jq '.directBulkLinks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     api_links=$(jq '.downloadedApiLinks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    unresolved_api_links=$(jq '.unresolvedDirectLinks // 0' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     exported=$(jq '.exportedBooks' "$COPYRIGHT_OTZARIA_REPORT_PATH")
     blacklisted=$(jq '.skippedByBlacklist' "$COPYRIGHT_OTZARIA_REPORT_PATH")
     links=$(jq '.exportedLinks' "$COPYRIGHT_OTZARIA_REPORT_PATH")
@@ -72,9 +74,11 @@ COPYRIGHT_IMPORT_VALIDATION_PATH="${6:-build/copyright-import-validation.json}"
     echo "|---|---:|"
     echo "| ספרים שהתבקשו מה־API | $requested |"
     echo "| ספרים שהורדו | $downloaded |"
+    echo "| כשלי הורדת ספרים לאחר ניסיונות חוזרים | $download_errors |"
     echo "| גרסאות עבריות שהורדו ומוזגו | $versions |"
     echo "| קישורים ישירים שנמצאו ב־bulk CSV | $direct_links |"
     echo "| קישורים ישירים שקיבלו מראה־מקום עברי מה־API | $api_links |"
+    echo "| קישורים ישירים שלא נפתרו ב־API | $unresolved_api_links |"
     echo "| ספרים שיוצאו ל־ZIP הנפרד | $exported |"
     echo "| ספרי Copyright שסוננו ברשימה השחורה | $blacklisted |"
     echo "| קישורים שיוצאו בפורמט אוצריא | $links |"

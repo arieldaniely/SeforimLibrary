@@ -138,9 +138,9 @@ def bottom_section_ref(ref: str) -> str:
     return start.rsplit(":", 1)[0] if ":" in start else start
 
 
-def download_links(direct_links: list[dict]) -> list[dict]:
+def download_links(direct_links: list[dict]) -> tuple[list[dict], list[dict]]:
     if not direct_links:
-        return []
+        return [], []
     section_refs = sorted({bottom_section_ref(link["anchorRef"]) for link in direct_links})
     raw_links = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -153,10 +153,16 @@ def download_links(direct_links: list[dict]) -> list[dict]:
             for ref in section_refs
         }
         for future in concurrent.futures.as_completed(futures):
-            response = future.result()
-            if not isinstance(response, list):
-                raise ValueError(f"Unexpected links response for {futures[future]}")
-            raw_links.extend(response)
+            section_ref = futures[future]
+            try:
+                response = future.result()
+                if not isinstance(response, list):
+                    raise ValueError("Unexpected links response")
+                raw_links.extend(response)
+            except Exception:
+                # The per-target Text API fallback below can still resolve every
+                # genuine pair found in the bulk CSV when a Links API section fails.
+                continue
 
     api_by_pair = {}
     api_by_target = {}
@@ -174,27 +180,67 @@ def download_links(direct_links: list[dict]) -> list[dict]:
         for link in direct_links
         if normalize_ref(link["sourceRef"]) not in api_by_target
     }
+    target_errors = {}
     if missing_targets:
         def fetch_he_ref(target: str) -> tuple[str, str | None]:
-            response = fetch_json(
-                f"/api/texts/{urllib.parse.quote(target, safe='')}",
-                {"context": "0", "commentary": "0", "pad": "1"},
-            )
-            return target, response.get("heRef") if isinstance(response, dict) else None
+            encoded_target = urllib.parse.quote(target, safe="")
+            failures = []
+            try:
+                response = fetch_json(
+                    f"/api/texts/{encoded_target}",
+                    {"context": "0", "commentary": "0", "pad": "1"},
+                )
+                he_ref = response.get("heRef") if isinstance(response, dict) else None
+                if he_ref:
+                    return target, he_ref
+                failures.append("v1 returned no heRef")
+            except Exception as error:
+                failures.append(f"v1: {error}")
+
+            try:
+                response = fetch_json(
+                    f"/api/v3/texts/{encoded_target}",
+                    {"version": "primary"},
+                )
+                he_ref = response.get("heRef") if isinstance(response, dict) else None
+                if he_ref:
+                    return target, he_ref
+                failures.append("v3 returned no heRef")
+            except Exception as error:
+                failures.append(f"v3: {error}")
+            raise ValueError("; ".join(failures))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            for target, he_ref in executor.map(fetch_he_ref, sorted(missing_targets)):
-                if he_ref:
-                    api_by_target[target] = he_ref
+            futures = {executor.submit(fetch_he_ref, target): target for target in sorted(missing_targets)}
+            for future in concurrent.futures.as_completed(futures):
+                target = futures[future]
+                try:
+                    _, he_ref = future.result()
+                    if he_ref:
+                        api_by_target[target] = he_ref
+                    else:
+                        target_errors[target] = "Text API returned no heRef"
+                except Exception as error:
+                    target_errors[target] = str(error)
 
     resolved = []
     unresolved = []
+    seen_unresolved = set()
     for link in direct_links:
         anchor = normalize_ref(link["anchorRef"])
         target = normalize_ref(link["sourceRef"])
         he_ref = api_by_pair.get((anchor, target)) or api_by_target.get(target)
         if not he_ref:
-            unresolved.append(target)
+            key = (anchor, target)
+            if key not in seen_unresolved:
+                seen_unresolved.add(key)
+                unresolved.append(
+                    {
+                        "anchorRef": anchor,
+                        "sourceRef": target,
+                        "error": target_errors.get(target, "Could not resolve Hebrew ref"),
+                    }
+                )
             continue
         resolved.append(
             {
@@ -205,9 +251,8 @@ def download_links(direct_links: list[dict]) -> list[dict]:
                 "connectionType": link["connectionType"],
             }
         )
-    if unresolved:
-        raise ValueError(f"Could not resolve {len(unresolved)} direct Sefaria links to Hebrew refs")
-    return resolved
+    return resolved, unresolved
+
 
 def merge_text(primary: object, fallback: object) -> object:
     if isinstance(primary, str):
@@ -276,7 +321,7 @@ def download_title(item: dict, database_export: Path, direct_links: list[dict]) 
         encoding="utf-8",
     )
 
-    links = download_links(direct_links)
+    links, link_errors = download_links(direct_links)
 
     return {
         "schemaTitle": schema_title,
@@ -284,6 +329,7 @@ def download_title(item: dict, database_export: Path, direct_links: list[dict]) 
         "mergedPath": str(merged_path.resolve()),
         "downloadedVersions": len(downloaded_versions),
         "links": links,
+        "linkErrors": link_errors,
     }
 
 
@@ -323,12 +369,19 @@ def main() -> int:
             try:
                 completed.append(future.result())
             except Exception as error:
-                errors.append({"heTitle": item.get("heTitle"), "error": str(error)})
+                failure = {"heTitle": item.get("heTitle"), "error": str(error)}
+                errors.append(failure)
+                print(f"::error::{failure['heTitle']}: {failure['error']}", flush=True)
             if count % 10 == 0 or count == len(items):
-                print(f"Downloaded {count}/{len(items)} copyright titles; errors={len(errors)}", flush=True)
+                print(f"Processed {count}/{len(items)} copyright titles; errors={len(errors)}", flush=True)
 
     completed.sort(key=lambda item: item["heTitle"])
     all_links = [link for item in completed for link in item["links"]]
+    link_errors = [
+        {"heTitle": item["heTitle"], **error}
+        for item in completed
+        for error in item["linkErrors"]
+    ]
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     args.manifest.write_text(
         "".join(item["mergedPath"] + "\n" for item in completed),
@@ -343,6 +396,8 @@ def main() -> int:
                 "downloadedHebrewVersions": sum(item["downloadedVersions"] for item in completed),
                 "directBulkLinks": sum(len(links) for links in direct_links_by_title.values()),
                 "downloadedApiLinks": len(all_links),
+                "unresolvedDirectLinks": len(link_errors),
+                "linkErrors": link_errors,
                 "errors": errors,
             },
             ensure_ascii=False,
@@ -351,8 +406,17 @@ def main() -> int:
         + "\n",
         encoding="utf-8",
     )
-    if errors:
-        print(f"::error::{len(errors)} copyright books or link sets could not be downloaded")
+    if link_errors:
+        print(f"::error::{len(link_errors)} direct links could not be resolved after v1 and v3 fallbacks")
+        for error in link_errors[:20]:
+            anchor = error.get("anchorRef") or error.get("sectionRef")
+            print(
+                f"::error::{error.get('heTitle')}: {anchor} -> "
+                f"{error.get('sourceRef', '')}: {error.get('error')}"
+            )
+    if link_errors or errors:
+        if errors:
+            print(f"::error::{len(errors)} copyright books could not be downloaded")
         return 1
     if not completed:
         print("::error::No Hebrew copyright books were downloaded")
