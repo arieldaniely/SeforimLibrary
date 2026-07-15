@@ -12,13 +12,18 @@
   הספציפיים לאוצריא. כך בהיסטוריה של `otzaria` **רואים בבירור איפה כל ענף מתחיל ונגמר**:
 
 ```
-*   Merge branch 'linker' into otzaria          ← בועת הלינקר (ראש otzaria)
+*   … קומיטי-אוצריא עליונים (cascade-tooling / manifest) …   ← ראש otzaria
+*   Merge branch 'feat/sefaria-dependence-linktypes' into otzaria   ← בועת הפיצ'ר החדש
+|\
+| * schema v2 (תלות) + ConnectionType + ייבוא declared/inferred + שכבת QA/CI  (27 קומיטים)
+|/
+*   Merge branch 'linker' into otzaria          ← בועת הלינקר
 |\
 | * Stage 5: LINKER connection type + sidecar + Phase-2 generateLinkerLinks
 | * Build: publish lines_snapshot.db.zst for the linker
 | * Linker stage 0: fix Otzaria source-hash detection + add dumpLines
 |/
-*   … קומיטי-אוצריא (blacklist / תא שמע / manifest) …
+*   … קומיטי-תשתית-אוצריא (blacklist / תא שמע) …
 *   Merge branch 'feat/otzaria-ranged-links-and-alt-toc' into otzaria
 |\
 | * fix(otzaria): שמירת קישורי SOURCE בכיוון קנוני (בסיס→מפרש)
@@ -47,10 +52,12 @@
 > כמו "rebase & merge" בגיטהאב). ענפי הפיצ'ר עצמם (`fix/*`, `perf`, `word-level`,
 > `ranged`, `hearot`, `otzaria-ranged`) נשארים **טהורים ולינאריים** — מוכנים ל-PR ל-upstream.
 >
-> **חריג — `linker`:** בניגוד ליתר הענפים, `linker` **אינו** פיצ'ר טהור מעל
-> `default_commentators`. הוא מבוסס על **שכבת-התשתית של אוצריא** (זקוק ל-workflow
-> הרליס ולהורדת ספריית-אוצריא), ולכן הבועה שלו יושבת **בראש** `otzaria` — מעל
-> קומיטי-אוצריא — ולא בין שאר בועות-הפיצ'ר. `otzaria` נשארת הענף העליון (ראשה = ה-merge).
+> **חריג — בועות מבוססות-תשתית (`linker`, `feat/sefaria-dependence-linktypes`):**
+> בניגוד ליתר הענפים, שתי בועות אלו **אינן** פיצ'רים טהורים מעל `default_commentators`.
+> הן מבוססות על **שכבת-התשתית של אוצריא** (משנות את `manual-generate-release.yml`
+> וצינור-הרליס), ולכן יושבות **מעל שכבת-התשתית** בראש `otzaria` — `linker` ראשונה,
+> ומעליה בועת `feat/sefaria-dependence-linktypes` — ולא בין שאר בועות-הפיצ'ר. מעל
+> שתיהן מונחים קומיטי-המטא העליונים (cascade-tooling / manifest). `otzaria` נשארת הענף העליון.
 
 ---
 
@@ -71,10 +78,10 @@ fix/category-ids-full-path → fix/book-corpus-talmud → perf/faster-generation
                                                                 [פיצ'רים — rebase, PR נפרד לכל אחד]
                                           │
                                           ▼   (כל פיצ'ר → בועת merge)
-                                       otzaria  = בועות הפיצ'רים + קומיטי-אוצריא
-                                          │                + בועת linker בראש
+                                       otzaria  = בועות הפיצ'רים + קומיטי-תשתית
+                                          │      + בועות linker & sefaria-dependence + קומיטי-מטא בראש
                                           ▼
-                                       linker   (9 קומיטים מעל תשתית-אוצריא) ──┐
+                    linker (9) → feat/sefaria-dependence-linktypes (27)   [בועות מעל תשתית-אוצריא]
                                           └───────────── merge --no-ff ────────┘
 ```
 
@@ -95,7 +102,8 @@ fix/category-ids-full-path → fix/book-corpus-talmud → perf/faster-generation
 | 11 | `feat/hearot-standalone-books` | ↑ | 2 | ספרי "הערות" עצמאיים כמפרשים + תיקון חברותא (מזהים יציבים) |
 | 12 | `feat/otzaria-ranged-links-and-alt-toc` | ↑ | 2 | קישורי-טווח + alt-toc + תיקון SOURCE הפוך |
 | — | `otzaria` | (merge של כולם) | 12 (+manifest) | קומיטים ספציפיים לאוצריא |
-| 13 | `linker` | תשתית-אוצריא (בראש `otzaria`) | 9 | לינקר: DumpLines + source-hash + Phase-2 + הקשחה + patch-gate + ניקוי-דיסק |
+| 13 | `linker` | תשתית-אוצריא (מעל, ב-`otzaria`) | 9 | לינקר: DumpLines + source-hash + Phase-2 + הקשחה + patch-gate + ניקוי-דיסק |
+| 14 | `feat/sefaria-dependence-linktypes` | תשתית-אוצריא (מעל `linker`) | 27 | ייבוא תלות (isDependant) + ConnectionType + סכמה 2 + book_base_text + שכבת QA/CI |
 
 ---
 
@@ -180,10 +188,10 @@ word-level anchors, ייבוא charLevelData מדויק, ותוויות תצוג
 `אי-אריזת מודל ההטמעה`, `שינויי מיקומים → תת-קטגוריה`, החרגת/התרת "תא שמע", ועריכת
 `books_blacklist`. מעל קומיטי-אוצריא — קומיטי manifest של ה-CI, ובראש הכל **בועת `linker`**.
 
-### 13. `linker` — בועה בראש `otzaria`
+### 13. `linker` — בועה מבוססת-תשתית
 תמיכת ה-**לינקר** (Sefaria linker → קישורי-LINKER ב-DB). תשעה קומיטים המבוססים על
 **שכבת-התשתית של אוצריא** (ולכן אינם פיצ'ר טהור — ראו החריג למעלה), ממוזגים ב-`--no-ff`
-בראש `otzaria` (3 בסיס + 6 תיקונים):
+מעל שכבת-התשתית ב-`otzaria` — מתחת לבועת `feat/sefaria-dependence-linktypes` (3 בסיס + 6 תיקונים):
 - **`Linker stage 0`** — זיהוי source-hash של אוצריא ב-`SourceHashComputer` (מעקב שינויי-מקור
   לצורך snapshot), ו-`DumpLines` (packaging) לייצוא תוכן-שורות נקי שהלינקר החיצוני צורך.
   נוגע גם ב-`Generator.kt` (otzariasqlite) — ולכן ממוקם מעל בועת `feat/otzaria-ranged…`.
@@ -211,6 +219,30 @@ word-level anchors, ייבוא charLevelData מדויק, ותוויות תצוג
   (אחרי שלבי הלינקר כבדי-הדיסק); `manual-generate-release.yml`.
 > טסטים: `SourceHashComputerTest`, `GenerateLinkerLinksTest`, `InMemoryIdAllocatorTest`.
 > תיעוד: `LINKER_DELTA_PLAN.md`, `LINKER_IMPLEMENTATION_STAGES.md`.
+
+### 14. `feat/sefaria-dependence-linktypes` — בועה מבוססת-תשתית (מעל `linker`)
+מימוש **תוכנית ייבוא v2.2** ([`SEFARIA_METADATA_IMPORT_PLAN.md`](SEFARIA_METADATA_IMPORT_PLAN.md)):
+ייבוא נתוני **תלות** (`isDependant`) וסוגי-קישורים מ-Sefaria, במעבר ל-**סכמת-DB גרסה 2**.
+27 קומיטים המבוססים על בועת `linker` (משנים את `manual-generate-release.yml`/`contract.yml`
+ואת צינור-הרליס — ולכן בועה מבוססת-תשתית, כמו `linker`):
+- **סכמה 2 (בסיס):** עמודות `dependenceType`/`collectiveTitleHe`/`collectiveTitleEn` ב-`book`
+  (`isDependant` נגזר = `dependenceType IS NOT NULL`), טבלת-גשר `book_base_text`, ורישום
+  ב-`PatchTables`/`LogicalContentHasher` (`PatchDbSchema.CURRENT_VERSION 1→2`). שכבת DAO/מודלים/API.
+- **`ConnectionType`:** 8 סוגים חדשים אחרי `LINKER` + `fromKnownStringOrNull`; guard קשיח —
+  סוג connection לא-ממופה מכשיל build.
+- **`ELUCIDATION` כסוג תלוי:** `ORIENTED_DEPENDANT_TYPES`, רשימות-mirror, `hasSourceConnection`,
+  ו-demotion חוצה-קורפוס. `selectCommentatorsByBook` מיושר לקבוצת התלויים המלאה.
+- **ייבוא:** `rawDependence` + `collectiveTitle` ב-payload, פיצול declared/inferred כדרגת
+  provenance, והתמדה. תיקון רזולוציית-בסיסים (primaries גוברים על aliases; 5,437→5,426).
+- **הקשחת guard בייבוא-קישורים:** כותרות חסרות, בדיקת-סוג לפני דילוג, דחיית `SOURCE`,
+  בדיקת provenance, דילוג מפורש על קובצי-אגרגט (`links_by_book*`) ועל anchor חוצה-סכמה.
+- **מדדי-ייבוא אמיתיים:** `rowsRead`/`written`/`persistedByType`, דו"ח JSON אטומי אחרי שמירת ה-DB.
+- **שכבת QA/CI:** סקריפטי QA (`scripts/qa/`, סעיף 10 בתוכנית) לתלות/`book_base_text`/
+  provenance/שלמות; בדיקת-contract לרשימות ה-patch מול `otzaria_library_updater`; צעד QA
+  חובה ברליס + בדיקת-חוזה קוטלינית ב-push; `resolveSchemaVersion` + schema-version plumbing.
+> טסטים: `ConnectionTypeTest`, `SeforimRepositoryIntegrationTest`, `PatchTablesContractTest`,
+> `ResolveSchemaVersionTest`, `SefariaLink*Test`, `CrossCorpusDemotionTest`, `scripts/qa/tests`.
+> תיעוד: `SEFARIA_METADATA_IMPORT_PLAN.md`, `DELTA_UPDATE_WORKFLOW.md`.
 
 ---
 
