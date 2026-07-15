@@ -212,6 +212,9 @@ tasks.register<JavaExec>("appendOtzariaLines") {
     systemProperty("onlyMissingBooks", "true")
     systemProperty("baseDb", baseDb)
     systemProperty("persistDb", persistDb)
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
     val newBookIdsFile = (project.findProperty("newBookIdsFile") as String?)
         ?: rootProject.layout.buildDirectory.file("otzaria-new-book-ids.txt").get().asFile.absolutePath
     systemProperty("newBookIdsFile", newBookIdsFile)
@@ -258,6 +261,9 @@ tasks.register<JavaExec>("appendOtzariaLinks") {
     systemProperty("inMemoryDb", useMemoryDb.toString())
     systemProperty("baseDb", persistDb)
     systemProperty("persistDb", persistDb)
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
     val newBookIdsFile = (project.findProperty("newBookIdsFile") as String?)
         ?: rootProject.layout.buildDirectory.file("otzaria-new-book-ids.txt").get().asFile.absolutePath
     systemProperty("newBookIdsFile", newBookIdsFile)
@@ -298,6 +304,10 @@ tasks.register<JavaExec>("generateHavroutaLinks") {
         rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
     }
     args(defaultDbPath)
+
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
 
     (project.findProperty("newBookIdsFile") as String?)?.let {
         systemProperty("newBookIdsFile", it)

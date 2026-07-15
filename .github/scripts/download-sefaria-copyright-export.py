@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download Hebrew copyright-only Sefaria texts and their outbound links."""
+"""Download supplemental Hebrew Sefaria texts missing from the bulk export and their links."""
 
 from __future__ import annotations
 
@@ -443,7 +443,7 @@ def download_title(item: dict, database_export: Path, direct_links: list[dict]) 
             raise ValueError(f"No Hebrew text returned for {he_title}: {version_title}")
         text = version_text if text is None else merge_text(text, version_text)
         downloaded_versions.append(version_title)
-    merged_path = database_export / "json" / "__copyright_api__" / schema_title / "merged.json"
+    merged_path = database_export / "json" / "__supplemental_api__" / schema_title / "merged.json"
     merged_path.parent.mkdir(parents=True, exist_ok=True)
     merged_path.write_text(
         json.dumps(
@@ -496,7 +496,7 @@ def main() -> int:
 
     items = json.loads(args.report.read_text(encoding="utf-8"))
     if not isinstance(items, list):
-        raise ValueError("Copyright report must contain a JSON array")
+        raise ValueError("Supplemental Hebrew report must contain a JSON array")
     database_export = find_database_export(args.export_root)
     requested_count = len(items)
     items, blacklisted_items = prefilter_blacklisted_items(
@@ -506,7 +506,7 @@ def main() -> int:
         args.authors_blacklist,
     )
     if blacklisted_items:
-        print(f"Filtered {len(blacklisted_items)} copyright titles by blacklist before API download")
+        print(f"Filtered {len(blacklisted_items)} supplemental Hebrew titles by blacklist before API download")
         for blocked in blacklisted_items:
             print(f"  - {blocked.get('heTitle')} ({', '.join(blocked['reasons'])})")
     direct_links_by_title = scan_direct_links(
@@ -535,7 +535,7 @@ def main() -> int:
                 errors.append(failure)
                 print(f"::error::{failure['heTitle']}: {failure['error']}", flush=True)
             if count % 10 == 0 or count == len(items):
-                print(f"Processed {count}/{len(items)} copyright titles; errors={len(errors)}", flush=True)
+                print(f"Processed {count}/{len(items)} supplemental Hebrew titles; errors={len(errors)}", flush=True)
 
     completed.sort(key=lambda item: item["heTitle"])
     all_links = [link for item in completed for link in item["links"]]
@@ -561,6 +561,16 @@ def main() -> int:
                 "directBulkLinks": sum(len(links) for links in direct_links_by_title.values()),
                 "downloadedApiLinks": len(all_links),
                 "unresolvedDirectLinks": len(link_errors),
+                "completedBooks": [
+                    {
+                        "schemaTitle": item["schemaTitle"],
+                        "heTitle": item["heTitle"],
+                        "downloadedVersions": item["downloadedVersions"],
+                        "resolvedLinks": len(item["links"]),
+                        "unresolvedLinks": len(item["linkErrors"]),
+                    }
+                    for item in completed
+                ],
                 "linkErrors": link_errors,
                 "errors": errors,
             },
@@ -572,7 +582,7 @@ def main() -> int:
     )
     if link_errors:
         print(f"::error::{len(link_errors)} direct links could not be resolved after v1 and v3 fallbacks")
-        for error in link_errors[:20]:
+        for error in link_errors:
             anchor = error.get("anchorRef") or error.get("sectionRef")
             print(
                 f"::error::{error.get('heTitle')}: {anchor} -> "
@@ -580,10 +590,10 @@ def main() -> int:
             )
     if link_errors or errors:
         if errors:
-            print(f"::error::{len(errors)} copyright books could not be downloaded")
+            print(f"::error::{len(errors)} supplemental Hebrew books could not be downloaded")
         return 1
     if not completed:
-        print("::error::No Hebrew copyright books were downloaded")
+        print("::error::No supplemental Hebrew books were downloaded")
         return 1
     return 0
 

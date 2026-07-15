@@ -873,6 +873,16 @@ class DatabaseGenerator(
 
         // Assign a stable ID via IdAllocator so cross-build reproducibility holds.
         val currentBookId = allocator.bookId(srcName, title)
+        if (onlyMissingBooks) {
+            repository.getBook(currentBookId)?.let { existing ->
+                val existingSource = repository.getSourceById(existing.sourceId)?.name ?: "unknown"
+                error(
+                    "Stable book ID collision while appending '$title' (source=$srcName): " +
+                        "allocated ID $currentBookId already belongs to '${existing.title}' " +
+                        "(source=$existingSource). The database and buildStatePath are out of sync."
+                )
+            }
+        }
         logger.d { "Assigning ID $currentBookId to book '$title' (source=$srcName) with categoryId: $categoryId" }
 
         // Pre-resolve author / pubPlace / pubDate IDs through the IdAllocator
