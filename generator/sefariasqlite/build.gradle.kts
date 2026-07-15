@@ -127,6 +127,7 @@ tasks.register<JavaExec>("exportIncrementalSefariaOtzaria") {
     dependsOn("jvmJar")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.ExportIncrementalSefariaOtzariaKt")
     classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    workingDir(rootProject.projectDir)
 
     val seedDb = (project.findProperty("seedDb") as String?)
         ?: System.getenv("SEED_DB")
