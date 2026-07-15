@@ -4,6 +4,9 @@ set -uo pipefail
 SEFARIA_REPORT_PATH="${1:-build/incremental-sefaria-report.json}"
 COPYRIGHT_REPORT_PATH="${2:-build/copyright-only-titles.json}"
 COPYRIGHT_STATUS_PATH="${3:-build/copyright-report-status.json}"
+COPYRIGHT_DOWNLOAD_STATUS_PATH="${4:-build/copyright-download-status.json}"
+COPYRIGHT_OTZARIA_REPORT_PATH="${5:-build/copyright-otzaria-report.json}"
+COPYRIGHT_IMPORT_VALIDATION_PATH="${6:-build/copyright-import-validation.json}"
 
 {
   echo "# סיכום ייצוא ספריא ל־Otzaria ZIP"
@@ -51,6 +54,39 @@ COPYRIGHT_STATUS_PATH="${3:-build/copyright-report-status.json}"
     echo "</details>"
   else
     echo "דוח זכויות היוצרים בעברית לא נוצר."
+  fi
+  if [[ -s "$COPYRIGHT_DOWNLOAD_STATUS_PATH" && -s "$COPYRIGHT_OTZARIA_REPORT_PATH" ]]; then
+    echo
+    echo "## ZIP נפרד של ספרי Copyright בעברית"
+    echo
+    requested=$(jq '.requestedBooks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    downloaded=$(jq '.downloadedBooks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    versions=$(jq '.downloadedHebrewVersions' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    direct_links=$(jq '.directBulkLinks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    api_links=$(jq '.downloadedApiLinks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    exported=$(jq '.exportedBooks' "$COPYRIGHT_OTZARIA_REPORT_PATH")
+    blacklisted=$(jq '.skippedByBlacklist' "$COPYRIGHT_OTZARIA_REPORT_PATH")
+    links=$(jq '.exportedLinks' "$COPYRIGHT_OTZARIA_REPORT_PATH")
+    unresolved=$(jq '.unresolvedExternalLinks' "$COPYRIGHT_OTZARIA_REPORT_PATH")
+    echo "| מדד | כמות |"
+    echo "|---|---:|"
+    echo "| ספרים שהתבקשו מה־API | $requested |"
+    echo "| ספרים שהורדו | $downloaded |"
+    echo "| גרסאות עבריות שהורדו ומוזגו | $versions |"
+    echo "| קישורים ישירים שנמצאו ב־bulk CSV | $direct_links |"
+    echo "| קישורים ישירים שקיבלו מראה־מקום עברי מה־API | $api_links |"
+    echo "| ספרים שיוצאו ל־ZIP הנפרד | $exported |"
+    echo "| ספרי Copyright שסוננו ברשימה השחורה | $blacklisted |"
+    echo "| קישורים שיוצאו בפורמט אוצריא | $links |"
+    echo "| קישורים שלא נמצא להם יעד ב־seed | $unresolved |"
+    echo
+    if [[ -s "$COPYRIGHT_IMPORT_VALIDATION_PATH" ]] && [[ "$(jq -r '.verified' "$COPYRIGHT_IMPORT_VALIDATION_PATH")" == "true" ]]; then
+      added=$(jq '.addedBooks' "$COPYRIGHT_IMPORT_VALIDATION_PATH")
+      outbound_to_seed=$(jq '.outboundLinksToSeed' "$COPYRIGHT_IMPORT_VALIDATION_PATH")
+      echo "> ה־ZIP אומת באמצעות importer של אוצריא: נוספו $added ספרים ונוצרו $outbound_to_seed קישורים מהם לספרים שכבר היו ב־seed DB."
+    else
+      echo "> אימות ה־ZIP באמצעות importer של אוצריא לא הושלם בהצלחה."
+    fi
   fi
   echo
   echo "<details><summary>דוגמאות לפריטים שסוננו ב־blacklist</summary>"

@@ -76,6 +76,7 @@ def inspect_title(schema_title: str):
         raise ValueError(f"No verified Hebrew title returned for {schema_title!r}")
 
     return {
+        "schemaTitle": schema_title,
         "title": normalized_title,
         "heTitle": hebrew_title,
         "categories": index.get("categories") or [],
