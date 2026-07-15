@@ -24,21 +24,20 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 /**
- * Exports books that were blocked by historical Sefaria blacklists and are
- * allowed by the current blacklists as an Otzaria-compatible ZIP. A read-only
- * seed DB comparison remains available as a fallback for existing callers.
+ * Exports the currently allowed Sefaria books that are absent from a seed DB
+ * as an Otzaria-compatible ZIP. The seed is opened read-only and is never
+ * copied or modified.
  */
 fun main() = runBlocking {
     Logger.setMinSeverity(Severity.Info)
     val logger = Logger.withTag("SefariaOtzariaExport")
 
-    val baselineAuthorsPath = (System.getProperty("baselineAuthorsBlacklist")
-        ?: System.getenv("BASELINE_AUTHORS_BLACKLIST"))?.let(Paths::get)?.toAbsolutePath()?.normalize()
-    val baselineBooksPath = (System.getProperty("baselineBooksBlacklist")
-        ?: System.getenv("BASELINE_BOOKS_BLACKLIST"))?.let(Paths::get)?.toAbsolutePath()?.normalize()
-    require((baselineAuthorsPath == null) == (baselineBooksPath == null)) {
-        "Both baselineAuthorsBlacklist and baselineBooksBlacklist must be provided together"
-    }
+    val seedDb = Paths.get(
+        System.getProperty("seedDb")
+            ?: System.getenv("SEED_DB")
+            ?: Paths.get("build", "seforim.db").toString()
+    ).toAbsolutePath().normalize()
+    require(Files.isRegularFile(seedDb)) { "Seed database not found at $seedDb" }
 
     val outputDir = Paths.get(
         System.getProperty("outputDir")
@@ -49,6 +48,11 @@ fun main() = runBlocking {
         System.getProperty("outputZip")
             ?: System.getenv("OTZARIA_OUTPUT_ZIP")
             ?: Paths.get("build", "incremental-sefaria-otzaria.zip").toString()
+    ).toAbsolutePath().normalize()
+    val reportPath = Paths.get(
+        System.getProperty("reportPath")
+            ?: System.getenv("SEFARIA_INCREMENTAL_REPORT")
+            ?: Paths.get("build", "incremental-sefaria-report.json").toString()
     ).toAbsolutePath().normalize()
     require(!outputZip.startsWith(outputDir)) {
         "outputZip must be outside outputDir so it is not included in itself"
@@ -61,6 +65,7 @@ fun main() = runBlocking {
     val jsonDir = dbRoot.resolve("json")
     val schemaDir = dbRoot.resolve("schemas")
 
+    val existingTitleKeys = loadSeedTitleKeys(seedDb, logger)
     val json = Json {
         ignoreUnknownKeys = true
         coerceInputValues = true
@@ -69,43 +74,19 @@ fun main() = runBlocking {
     }
     val reader = SefariaBookPayloadReader(json, logger)
     val schemaLookup = reader.buildSchemaLookup(schemaDir)
-    val mergedFiles = if (baselineAuthorsPath != null && baselineBooksPath != null) {
-        require(Files.isRegularFile(baselineAuthorsPath)) {
-            "Baseline authors blacklist not found at $baselineAuthorsPath"
-        }
-        require(Files.isRegularFile(baselineBooksPath)) {
-            "Baseline books blacklist not found at $baselineBooksPath"
-        }
-        val historicalBlacklists = loadSefariaBlacklists(baselineAuthorsPath, baselineBooksPath, logger)
-        logger.i { "Selecting books blocked by the historical blacklists" }
-        reader.findMergedFilesBlacklistedBy(
-            jsonDir = jsonDir,
-            schemaDir = schemaDir,
-            schemaLookup = schemaLookup,
-            blacklists = historicalBlacklists,
-        )
-    } else {
-        val seedDb = Paths.get(
-            System.getProperty("seedDb")
-                ?: System.getenv("SEED_DB")
-                ?: Paths.get("build", "seforim.db").toString()
-        ).toAbsolutePath().normalize()
-        require(Files.isRegularFile(seedDb)) { "Seed database not found at $seedDb" }
-        logger.i { "No baseline blacklists supplied; falling back to seed DB title comparison" }
-        reader.findMergedFiles(
-            jsonDir = jsonDir,
-            schemaDir = schemaDir,
-            schemaLookup = schemaLookup,
-            excludedTitleKeys = loadSeedTitleKeys(seedDb, logger),
-        )
-    }
+    val selection = reader.selectMergedFiles(
+        jsonDir = jsonDir,
+        schemaDir = schemaDir,
+        schemaLookup = schemaLookup,
+        excludedTitleKeys = existingTitleKeys,
+    )
+    val mergedFiles = selection.files
 
     SefariaImageEmbedder.prefetch(mergedFiles, logger = logger)
     val candidates = reader.readBooksInParallel(mergedFiles, schemaDir, schemaLookup)
-    val currentBlacklists = loadSefariaBlacklists(SefariaOtzariaExporter::class.java.classLoader, logger)
     val filtered = filterBlacklistedPayloads(
         payloads = candidates,
-        blacklists = currentBlacklists,
+        blacklists = loadSefariaBlacklists(SefariaOtzariaExporter::class.java.classLoader, logger),
     )
     if (filtered.skippedTotal > 0) {
         logger.i {
@@ -122,11 +103,53 @@ fun main() = runBlocking {
         outputRoot = outputDir,
         outputZip = outputZip,
     )
+    val report = IncrementalSefariaExportReport(
+        source = "Sefaria bulk export",
+        schemasInSource = selection.schemaCount,
+        schemasWithoutMerged = selection.schemasWithoutMergedCount,
+        schemasWithoutMergedExamples = selection.schemasWithoutMergedExamples,
+        schemasWithoutMergedTitles = selection.schemasWithoutMergedTitles,
+        mergedBooksInSource = selection.discoveredCount,
+        skippedAlreadyInSeed = selection.excludedExistingTitleCount,
+        selectedForParsing = mergedFiles.size,
+        parsedSuccessfully = candidates.size,
+        skippedParseFailure = mergedFiles.size - candidates.size,
+        skippedByBlacklist = filtered.skippedTotal,
+        skippedByBookBlacklist = filtered.skippedByBook,
+        skippedByAuthorBlacklist = filtered.skippedByAuthor,
+        exportedBooks = result.bookCount,
+        exportedLinks = result.linkCount,
+        bookBlacklistExamples = filtered.skippedBookExamples,
+        authorBlacklistExamples = filtered.skippedAuthorExamples,
+    )
+    Files.createDirectories(reportPath.parent)
+    reportPath.writeText(json.encodeToString(report))
     logger.i {
         "Incremental Otzaria ZIP ready at ${result.zipPath}: " +
-            "books=${result.bookCount}, links=${result.linkCount}"
+            "books=${result.bookCount}, links=${result.linkCount}; report=$reportPath"
     }
 }
+
+@Serializable
+internal data class IncrementalSefariaExportReport(
+    val source: String,
+    val schemasInSource: Int,
+    val schemasWithoutMerged: Int,
+    val schemasWithoutMergedExamples: List<String>,
+    val schemasWithoutMergedTitles: List<String>,
+    val mergedBooksInSource: Int,
+    val skippedAlreadyInSeed: Int,
+    val selectedForParsing: Int,
+    val parsedSuccessfully: Int,
+    val skippedParseFailure: Int,
+    val skippedByBlacklist: Int,
+    val skippedByBookBlacklist: Int,
+    val skippedByAuthorBlacklist: Int,
+    val exportedBooks: Int,
+    val exportedLinks: Int,
+    val bookBlacklistExamples: List<String>,
+    val authorBlacklistExamples: List<String>,
+)
 
 internal class SefariaOtzariaExporter(
     private val json: Json = Json { prettyPrint = true; explicitNulls = false },

@@ -26,6 +26,16 @@ import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.readText
 
+internal data class MergedFileSelection(
+    val files: List<Path>,
+    val discoveredCount: Int,
+    val excludedExistingTitleCount: Int,
+    val schemaCount: Int,
+    val schemasWithoutMergedCount: Int,
+    val schemasWithoutMergedExamples: List<String>,
+    val schemasWithoutMergedTitles: List<String>,
+)
+
 internal class SefariaBookPayloadReader(
     private val json: Json,
     private val logger: Logger
@@ -61,13 +71,36 @@ internal class SefariaBookPayloadReader(
         schemaDir: Path,
         schemaLookup: Map<String, Path>,
         excludedTitleKeys: Set<String> = emptySet(),
-    ): List<Path> {
+    ): List<Path> = selectMergedFiles(jsonDir, schemaDir, schemaLookup, excludedTitleKeys).files
+
+    fun selectMergedFiles(
+        jsonDir: Path,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+        excludedTitleKeys: Set<String> = emptySet(),
+    ): MergedFileSelection {
         val mergedFiles = Files.walk(jsonDir).use { stream ->
             stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
                 .toList()
         }
 
-        if (excludedTitleKeys.isEmpty()) return mergedFiles
+        val schemaPaths = schemaLookup.values.toSet()
+        val mergedSchemaPaths = mergedFiles.mapNotNull { textPath ->
+            val folderName = textPath.parent?.fileName?.name ?: return@mapNotNull null
+            resolveSchemaPath(null, null, folderName, schemaDir, schemaLookup)
+        }.toSet()
+        val schemasWithoutMerged = (schemaPaths - mergedSchemaPaths).sortedBy { it.fileName.toString() }
+        fun selection(files: List<Path>, excludedCount: Int) = MergedFileSelection(
+            files = files,
+            discoveredCount = mergedFiles.size,
+            excludedExistingTitleCount = excludedCount,
+            schemaCount = schemaPaths.size,
+            schemasWithoutMergedCount = schemasWithoutMerged.size,
+            schemasWithoutMergedExamples = schemasWithoutMerged.take(10).map { it.fileName.toString().removeSuffix(".json") },
+            schemasWithoutMergedTitles = schemasWithoutMerged.map { it.fileName.toString().removeSuffix(".json") },
+        )
+
+        if (excludedTitleKeys.isEmpty()) return selection(mergedFiles, 0)
 
         val excludedBySchema = ConcurrentHashMap<Path, Boolean>()
         val filtered = mergedFiles.filterNot { textPath ->
@@ -93,56 +126,7 @@ internal class SefariaBookPayloadReader(
         logger.i {
             "Incremental title filter retained ${filtered.size}/${mergedFiles.size} merged.json files"
         }
-        return filtered
-    }
-
-    /**
-     * Selects books that were blocked by a historical blacklist without reading
-     * their large merged text payloads. Current blacklists are applied after parsing.
-     */
-    fun findMergedFilesBlacklistedBy(
-        jsonDir: Path,
-        schemaDir: Path,
-        schemaLookup: Map<String, Path>,
-        blacklists: SefariaBlacklists,
-    ): List<Path> {
-        val mergedFiles = findMergedFiles(jsonDir, schemaDir, schemaLookup)
-        val blockedBySchema = ConcurrentHashMap<Path, Boolean>()
-        val filtered = mergedFiles.filter { textPath ->
-            val folderName = textPath.parent?.fileName?.name ?: return@filter false
-            val schemaPath = resolveSchemaPath(
-                title = null,
-                heTitle = null,
-                folderName = folderName,
-                schemaDir = schemaDir,
-                lookup = schemaLookup,
-            ) ?: return@filter false
-            blockedBySchema.computeIfAbsent(schemaPath) { path ->
-                runCatching {
-                    val schemaJson = json.parseToJsonElement(path.readText()).jsonObject
-                    val schemaObj = schemaJson["schema"]?.jsonObject ?: return@runCatching false
-                    val enTitle = schemaObj["title"]?.stringOrNull().orEmpty()
-                    val heTitle = schemaObj["heTitle"]?.stringOrNull() ?: enTitle
-                    val categories = schemaJson["heCategories"]?.jsonArray
-                        ?.mapNotNull { it.jsonPrimitive.contentOrNull }
-                        ?: schemaObj["heCategories"]?.jsonArray
-                            ?.mapNotNull { it.jsonPrimitive.contentOrNull }
-                        ?: emptyList()
-                    val authors = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
-                        author.jsonObject["he"]?.stringOrNull()
-                    } ?: emptyList()
-                    isBookBlacklisted(heTitle, enTitle, categories, blacklists) ||
-                        isAuthorBlacklisted(authors, blacklists)
-                }.getOrElse { error ->
-                    logger.w(error) { "Unable to inspect historical blacklist candidate $path" }
-                    false
-                }
-            }
-        }
-        logger.i {
-            "Historical blacklist filter retained ${filtered.size}/${mergedFiles.size} merged.json files"
-        }
-        return filtered
+        return selection(filtered, mergedFiles.size - filtered.size)
     }
 
     /** Read and parse book files in parallel using coroutines. */

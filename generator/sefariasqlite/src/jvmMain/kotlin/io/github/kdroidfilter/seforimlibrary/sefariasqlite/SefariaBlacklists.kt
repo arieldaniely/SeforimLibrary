@@ -1,8 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
-import java.nio.file.Files
-import java.nio.file.Path
 
 internal data class SefariaBlacklists(
     val authorKeys: Set<String>,
@@ -34,20 +32,6 @@ internal fun loadSefariaBlacklists(classLoader: ClassLoader?, logger: Logger): S
     val authorEntries = loadBlacklistEntries(classLoader, "authors_blacklist.txt", logger)
     val bookEntries = loadBlacklistEntries(classLoader, "books_blacklist.txt", logger)
 
-    return buildSefariaBlacklists(authorEntries, bookEntries)
-}
-
-internal fun loadSefariaBlacklists(authorsPath: Path, booksPath: Path, logger: Logger): SefariaBlacklists {
-    val authorEntries = loadBlacklistEntries(authorsPath, logger)
-    val bookEntries = loadBlacklistEntries(booksPath, logger)
-
-    return buildSefariaBlacklists(authorEntries, bookEntries)
-}
-
-private fun buildSefariaBlacklists(
-    authorEntries: List<String>,
-    bookEntries: List<String>,
-): SefariaBlacklists {
     val authorKeys = authorEntries.mapNotNull { normalizeTitleKey(it) }.toSet()
     val bookTitleKeys = bookEntries.mapNotNull { normalizeTitleKey(it) }.toSet()
     val bookPathKeys = bookEntries
@@ -124,41 +108,23 @@ internal fun filterBlacklistedPayloads(
     )
 }
 
-internal fun isBookBlacklisted(payload: BookPayload, blacklists: SefariaBlacklists): Boolean =
-    isBookBlacklisted(payload.heTitle, payload.enTitle, payload.categoriesHe, blacklists)
-
-internal fun isBookBlacklisted(
-    heTitle: String,
-    enTitle: String,
-    categoriesHe: List<String>,
-    blacklists: SefariaBlacklists,
-): Boolean {
+private fun isBookBlacklisted(payload: BookPayload, blacklists: SefariaBlacklists): Boolean {
     if (blacklists.bookTitleKeys.isNotEmpty()) {
-        normalizeTitleKey(heTitle)?.let { if (it in blacklists.bookTitleKeys) return true }
-        normalizeTitleKey(enTitle)?.let { if (it in blacklists.bookTitleKeys) return true }
+        normalizeTitleKey(payload.heTitle)?.let { if (it in blacklists.bookTitleKeys) return true }
+        normalizeTitleKey(payload.enTitle)?.let { if (it in blacklists.bookTitleKeys) return true }
     }
     if (blacklists.bookPathKeys.isNotEmpty()) {
-        val path = normalizedBookPath(categoriesHe, heTitle)
+        val path = normalizedBookPath(payload.categoriesHe, payload.heTitle)
         if (path in blacklists.bookPathKeys) return true
     }
     return false
 }
 
-internal fun isAuthorBlacklisted(payload: BookPayload, blacklists: SefariaBlacklists): Boolean =
-    isAuthorBlacklisted(payload.authors, blacklists)
-
-internal fun isAuthorBlacklisted(authors: List<String>, blacklists: SefariaBlacklists): Boolean {
-    if (authors.isEmpty() || blacklists.authorKeys.isEmpty()) return false
-    return authors.any { author ->
+private fun isAuthorBlacklisted(payload: BookPayload, blacklists: SefariaBlacklists): Boolean {
+    if (payload.authors.isEmpty() || blacklists.authorKeys.isEmpty()) return false
+    return payload.authors.any { author ->
         normalizeTitleKey(author)?.let { it in blacklists.authorKeys } == true
     }
-}
-
-private fun loadBlacklistEntries(path: Path, logger: Logger): List<String> = try {
-    Files.newBufferedReader(path, Charsets.UTF_8).useLines(::parseBlacklistLines)
-} catch (e: Exception) {
-    logger.w(e) { "Unable to read blacklist file $path" }
-    throw e
 }
 
 private fun loadBlacklistEntries(
@@ -171,7 +137,14 @@ private fun loadBlacklistEntries(
         .firstOrNull()
         ?: return emptyList()
 
-    stream.bufferedReader(Charsets.UTF_8).useLines(::parseBlacklistLines)
+    stream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+        lines
+            .map { raw -> raw.removePrefix("\uFEFF") }
+            .map { raw -> raw.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .map { unescapeBlacklistLine(it) }
+            .toList()
+    }
 } catch (e: Exception) {
     logger.w(e) { "Unable to read $resourceName, continuing without it" }
     emptyList()
@@ -182,11 +155,4 @@ private fun unescapeBlacklistLine(value: String): String {
         .replace("\\\"", "\"")
         .replace("\\'", "'")
 }
-
-private fun parseBlacklistLines(lines: Sequence<String>): List<String> = lines
-    .map { raw -> raw.removePrefix("\uFEFF") }
-    .map { raw -> raw.trim() }
-    .filter { it.isNotEmpty() && !it.startsWith("#") }
-    .map { unescapeBlacklistLine(it) }
-    .toList()
 
