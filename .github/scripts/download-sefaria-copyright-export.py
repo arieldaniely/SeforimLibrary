@@ -133,6 +133,74 @@ def scan_direct_links(database_export: Path, titles: list[str]) -> dict[str, lis
     return by_title
 
 
+def normalize_title_key(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace('"', "").replace("'", "").replace("׳", "").replace("״", "").replace("_", " ").lower()).strip()
+
+
+def load_blacklist_entries(path: Path) -> list[str]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Blacklist file not found: {path}")
+    entries = []
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        value = raw.strip()
+        if value and not value.startswith("#"):
+            entries.append(value.replace('\\"', '"').replace("\\'", "'"))
+    return entries
+
+
+def prefilter_blacklisted_items(
+    items: list[dict],
+    database_export: Path,
+    books_blacklist: Path,
+    authors_blacklist: Path,
+) -> tuple[list[dict], list[dict]]:
+    book_entries = load_blacklist_entries(books_blacklist)
+    author_keys = {normalize_title_key(value) for value in load_blacklist_entries(authors_blacklist)}
+    book_title_keys = {normalize_title_key(value) for value in book_entries}
+    book_path_keys = {
+        value.strip().replace("\\", "/").strip("/")
+        for value in book_entries
+        if "/" in value or "\\" in value
+    }
+    allowed = []
+    blocked = []
+    for item in items:
+        schema_title = safe_schema_title(item.get("schemaTitle"))
+        schema_path = database_export / "schemas" / f"{schema_title}.json"
+        schema_doc = json.loads(schema_path.read_text(encoding="utf-8")) if schema_path.is_file() else {}
+        schema = schema_doc.get("schema") or {}
+        titles = {
+            normalize_title_key(item.get("schemaTitle")),
+            normalize_title_key(item.get("title")),
+            normalize_title_key(item.get("heTitle")),
+            normalize_title_key(schema.get("title")),
+            normalize_title_key(schema.get("heTitle")),
+        }
+        title_blocked = any(title and title in book_title_keys for title in titles)
+
+        categories = schema_doc.get("heCategories") or schema.get("heCategories") or []
+        book_path = "/".join([str(value).replace('"', "״").strip() for value in categories] + [str(item.get("heTitle") or "").replace('"', "״").strip()])
+        path_blocked = book_path in book_path_keys
+
+        author_values = []
+        for author in schema_doc.get("authors") or []:
+            if isinstance(author, dict):
+                author_values.extend([author.get("he"), author.get("en")])
+            else:
+                author_values.append(author)
+        author_blocked = any(normalize_title_key(author) in author_keys for author in author_values if author)
+
+        if title_blocked or path_blocked or author_blocked:
+            reasons = []
+            if title_blocked or path_blocked:
+                reasons.append("book")
+            if author_blocked:
+                reasons.append("author")
+            blocked.append({"schemaTitle": schema_title, "heTitle": item.get("heTitle"), "reasons": reasons})
+        else:
+            allowed.append(item)
+    return allowed, blocked
+
 def bottom_section_ref(ref: str) -> str:
     start = normalize_ref(ref).split("-", 1)[0].strip()
     return start.rsplit(":", 1)[0] if ":" in start else start
@@ -269,6 +337,75 @@ def merge_text(primary: object, fallback: object) -> object:
         }
     return primary if has_text(primary) else fallback
 
+def primary_node_title(node: dict) -> str:
+    direct = str(node.get("title") or "").strip()
+    if direct:
+        return direct
+    for title in node.get("titles") or []:
+        if title.get("lang") == "en" and title.get("primary"):
+            return str(title.get("text") or "").strip()
+    return str(node.get("key") or "").strip()
+
+
+def load_schema(database_export: Path, schema_title: str) -> dict:
+    schema_path = database_export / "schemas" / f"{schema_title}.json"
+    if not schema_path.is_file():
+        raise FileNotFoundError(f"Schema not found for {schema_title}: {schema_path}")
+    payload = json.loads(schema_path.read_text(encoding="utf-8"))
+    return payload.get("schema") or payload
+
+
+def download_complex_version(title: str, version_title: str, schema: dict) -> dict:
+    leaves = []
+
+    def collect(node: dict, ref_parts: list[str], output_keys: list[str]) -> None:
+        node_title = primary_node_title(node)
+        is_default = str(node.get("key") or "").lower() == "default"
+        next_ref_parts = ref_parts if is_default or not node_title else ref_parts + [node_title]
+        output_key = "" if is_default else node_title
+        next_output_keys = output_keys + [output_key]
+        children = node.get("nodes") or []
+        if children:
+            for child in children:
+                collect(child, next_ref_parts, next_output_keys)
+        else:
+            leaves.append((next_ref_parts, next_output_keys))
+
+    for child in schema.get("nodes") or []:
+        collect(child, [], [])
+    if not leaves:
+        raise ValueError(f"Complex schema for {title} contains no leaf nodes")
+
+    def fetch_leaf(leaf: tuple[list[str], list[str]]) -> tuple[list[str], object]:
+        ref_parts, output_keys = leaf
+        tref = ", ".join([title] + ref_parts)
+        response = fetch_json(
+            "/api/texts/{}/he/{}".format(
+                urllib.parse.quote(tref, safe=""),
+                urllib.parse.quote(version_title, safe=""),
+            ),
+            {
+                "context": "0",
+                "commentary": "0",
+                "pad": "0",
+                "alts": "0",
+                "fallbackOnDefaultVersion": "0",
+            },
+        )
+        if not isinstance(response, dict) or "he" not in response or response.get("error"):
+            error = response.get("error") if isinstance(response, dict) else "invalid response"
+            raise ValueError(f"No Hebrew payload returned for leaf {tref}: {error}")
+        return output_keys, response.get("he")
+
+    result = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        for output_keys, leaf_text in executor.map(fetch_leaf, leaves):
+            current = result
+            for key in output_keys[:-1]:
+                current = current.setdefault(key, {})
+            current[output_keys[-1]] = leaf_text
+    return result
+
 def download_title(item: dict, database_export: Path, direct_links: list[dict]) -> dict:
     schema_title = safe_schema_title(item.get("schemaTitle"))
     title = str(item.get("title") or "").strip()
@@ -278,26 +415,30 @@ def download_title(item: dict, database_export: Path, direct_links: list[dict]) 
         raise ValueError("Missing verified Hebrew title or version")
 
     text = None
+    schema = load_schema(database_export, schema_title)
     downloaded_versions = []
     for version in versions:
         version_title = str(version.get("versionTitle") or "").strip()
         if not version_title:
             raise ValueError(f"Missing Hebrew version title for {he_title}")
-        text_path = "/api/texts/{}/he/{}".format(
-            urllib.parse.quote(title, safe=""),
-            urllib.parse.quote(version_title, safe=""),
-        )
-        text_response = fetch_json(
-            text_path,
-            {
-                "context": "0",
-                "commentary": "0",
-                "pad": "0",
-                "alts": "0",
-                "fallbackOnDefaultVersion": "0",
-            },
-        )
-        version_text = text_response.get("he") if isinstance(text_response, dict) else None
+        if schema.get("nodes"):
+            version_text = download_complex_version(title, version_title, schema)
+        else:
+            text_path = "/api/texts/{}/he/{}".format(
+                urllib.parse.quote(title, safe=""),
+                urllib.parse.quote(version_title, safe=""),
+            )
+            text_response = fetch_json(
+                text_path,
+                {
+                    "context": "0",
+                    "commentary": "0",
+                    "pad": "0",
+                    "alts": "0",
+                    "fallbackOnDefaultVersion": "0",
+                },
+            )
+            version_text = text_response.get("he") if isinstance(text_response, dict) else None
         if not has_text(version_text):
             raise ValueError(f"No Hebrew text returned for {he_title}: {version_title}")
         text = version_text if text is None else merge_text(text, version_text)
@@ -340,6 +481,16 @@ def main() -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--links", required=True, type=Path)
     parser.add_argument("--status", required=True, type=Path)
+    parser.add_argument(
+        "--books-blacklist",
+        type=Path,
+        default=Path("generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt"),
+    )
+    parser.add_argument(
+        "--authors-blacklist",
+        type=Path,
+        default=Path("generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt"),
+    )
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
 
@@ -347,6 +498,17 @@ def main() -> int:
     if not isinstance(items, list):
         raise ValueError("Copyright report must contain a JSON array")
     database_export = find_database_export(args.export_root)
+    requested_count = len(items)
+    items, blacklisted_items = prefilter_blacklisted_items(
+        items,
+        database_export,
+        args.books_blacklist,
+        args.authors_blacklist,
+    )
+    if blacklisted_items:
+        print(f"Filtered {len(blacklisted_items)} copyright titles by blacklist before API download")
+        for blocked in blacklisted_items:
+            print(f"  - {blocked.get('heTitle')} ({', '.join(blocked['reasons'])})")
     direct_links_by_title = scan_direct_links(
         database_export,
         [str(item.get("title") or "") for item in items],
@@ -391,7 +553,9 @@ def main() -> int:
     args.status.write_text(
         json.dumps(
             {
-                "requestedBooks": len(items),
+                "requestedBooks": requested_count,
+                "eligibleAfterBlacklist": len(items),
+                "blacklistedBeforeDownload": blacklisted_items,
                 "downloadedBooks": len(completed),
                 "downloadedHebrewVersions": sum(item["downloadedVersions"] for item in completed),
                 "directBulkLinks": sum(len(links) for links in direct_links_by_title.values()),

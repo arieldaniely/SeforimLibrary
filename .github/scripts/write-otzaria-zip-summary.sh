@@ -61,6 +61,8 @@ COPYRIGHT_IMPORT_VALIDATION_PATH="${6:-build/copyright-import-validation.json}"
     echo
     requested=$(jq '.requestedBooks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     downloaded=$(jq '.downloadedBooks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    eligible=$(jq '.eligibleAfterBlacklist' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
+    prefiltered=$(jq '.blacklistedBeforeDownload | length' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     download_errors=$(jq '.errors | length' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     versions=$(jq '.downloadedHebrewVersions' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
     direct_links=$(jq '.directBulkLinks' "$COPYRIGHT_DOWNLOAD_STATUS_PATH")
@@ -73,6 +75,8 @@ COPYRIGHT_IMPORT_VALIDATION_PATH="${6:-build/copyright-import-validation.json}"
     echo "| מדד | כמות |"
     echo "|---|---:|"
     echo "| ספרים שהתבקשו מה־API | $requested |"
+    echo "| ספרים שסוננו ב־blacklist לפני הורדה | $prefiltered |"
+    echo "| ספרים שנותרו להורדה אחרי blacklist | $eligible |"
     echo "| ספרים שהורדו | $downloaded |"
     echo "| כשלי הורדת ספרים לאחר ניסיונות חוזרים | $download_errors |"
     echo "| גרסאות עבריות שהורדו ומוזגו | $versions |"

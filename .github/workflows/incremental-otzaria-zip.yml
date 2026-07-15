@@ -137,6 +137,8 @@ jobs:
             --manifest build/copyright-merged-files.txt \
             --links build/copyright-api-links.json \
             --status build/copyright-download-status.json \
+            --books-blacklist generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt \
+            --authors-blacklist generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt \
             --workers 2
 
       - name: Upload Copyright download diagnostics
