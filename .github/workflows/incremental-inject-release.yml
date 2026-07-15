@@ -143,6 +143,14 @@ jobs:
           test -s build/incremental-sefaria-otzaria.zip
           unzip -t build/incremental-sefaria-otzaria.zip
 
+      - name: Build Hebrew copyright exclusion report
+        run: |
+          python3 .github/scripts/build-sefaria-copyright-report.py \
+            --input build/incremental-sefaria-report.json \
+            --output build/copyright-only-titles.json \
+            --status build/copyright-report-status.json \
+            --workers 8
+
       - name: Inject missing Sefaria books
         run: |
           ./gradlew :sefariasqlite:appendMissingSefaria \
