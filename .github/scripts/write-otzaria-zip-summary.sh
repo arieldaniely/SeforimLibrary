@@ -6,10 +6,12 @@ SUPPLEMENTAL_REPORT_PATH="${2:-build/supplemental-hebrew-titles.json}"
 SUPPLEMENTAL_STATUS_PATH="${3:-build/supplemental-report-status.json}"
 DOWNLOAD_STATUS_PATH="${4:-build/supplemental-download-status.json}"
 OTZARIA_REPORT_PATH="${5:-build/supplemental-otzaria-report.json}"
-IMPORT_VALIDATION_PATH="${6:-build/supplemental-import-validation.json}"
+ZIP_VALIDATION_PATH="${6:-build/supplemental-zip-validation.json}"
 SEED_TAG="${7:-לא ידוע}"
 ARTIFACT_NAME="${8:-לא ידוע}"
 SUPPLEMENTAL_ENABLED="${9:-לא ידוע}"
+IMPORT_VALIDATION_PATH="${10:-build/supplemental-import-validation.json}"
+IMPORTER_VALIDATION_ENABLED="${11:-false}"
 
 md_escape() { sed -e 's/|/\\|/g' -e ':a;N;$!ba;s/\r\{0,1\}\n/ /g'; }
 json_value() { jq -r "$2 // 0" "$1" 2>/dev/null || printf 'לא זמין'; }
@@ -17,7 +19,7 @@ json_value() { jq -r "$2 // 0" "$1" 2>/dev/null || printf 'לא זמין'; }
 {
   echo "# דוח מפורט — ייצוא ספריא ל־Otzaria ZIP"
   echo
-  echo "> Seed: \`$SEED_TAG\` · Artifact: \`$ARTIFACT_NAME\` · ZIP משלים הופעל: \`$SUPPLEMENTAL_ENABLED\`"
+  echo "> Seed: \`$SEED_TAG\` · Artifact: \`$ARTIFACT_NAME\` · ZIP משלים הופעל: \`$SUPPLEMENTAL_ENABLED\` · בדיקת importer הופעלה: \`$IMPORTER_VALIDATION_ENABLED\`"
   echo
   echo "הדוח מפריד בין הייצוא הרגיל של ספריא לבין ספרים עבריים שחסרים בו ונמצאו דרך ה־API. כל קובצי ה־JSON הגולמיים מצורפים ל־artifacts לצורך בדיקה מלאה."
   echo
@@ -204,26 +206,46 @@ json_value() { jq -r "$2 // 0" "$1" 2>/dev/null || printf 'לא זמין'; }
     echo "> לא נוצר דוח ייצוא משלים."
   fi
   echo
-  if [[ -s "$IMPORT_VALIDATION_PATH" ]]; then
-    verified=$(jq -r '.verified // false' "$IMPORT_VALIDATION_PATH")
-    expected=$(json_value "$IMPORT_VALIDATION_PATH" '.expectedBooks // .addedBooks')
-    added=$(json_value "$IMPORT_VALIDATION_PATH" '.addedBooks')
-    importer_ids=$(json_value "$IMPORT_VALIDATION_PATH" '.importerIds // .addedBooks')
-    unique_ids=$(json_value "$IMPORT_VALIDATION_PATH" '.uniqueImporterIds // .addedBooks')
-    colliding_ids=$(json_value "$IMPORT_VALIDATION_PATH" '.collidingSeedIds')
-    outbound=$(json_value "$IMPORT_VALIDATION_PATH" '.outboundLinksToSeed')
-    state_sha=$(jq -r '.buildStateSha256 // "לא נרשם"' "$IMPORT_VALIDATION_PATH")
+  if [[ -s "$ZIP_VALIDATION_PATH" ]]; then
+    verified=$(jq -r '.verified // false' "$ZIP_VALIDATION_PATH")
+    books=$(json_value "$ZIP_VALIDATION_PATH" '.exportedBooks')
+    text_files=$(json_value "$ZIP_VALIDATION_PATH" '.textFiles')
+    links=$(json_value "$ZIP_VALIDATION_PATH" '.exportedLinks')
+    zip_bytes=$(json_value "$ZIP_VALIDATION_PATH" '.zipBytes')
+    zip_sha=$(jq -r '.zipSha256 // "לא נרשם"' "$ZIP_VALIDATION_PATH")
     if [[ "$verified" == "true" ]]; then
-      echo "> ✅ ה־ZIP המשלים אומת באמצעות importer אמיתי של Otzaria: צפויים **$expected**, נוספו **$added**, נרשמו **$importer_ids** מזהים (**$unique_ids** ייחודיים), התנגשויות מול seed: **$colliding_ids**, וקישורים לספרי seed: **$outbound**."
-      echo "> buildstate של ה־seed: \`$state_sha\`"
+      echo "> ✅ ה־ZIP המשלים תקין: **$books** ספרים, **$text_files** קובצי טקסט, **$links** קישורים וגודל **$zip_bytes** bytes."
+      echo "> SHA-256: \`$zip_sha\`"
     else
-      validation_error=$(jq -r '.error // "סיבת הכשל לא נרשמה"' "$IMPORT_VALIDATION_PATH")
-      echo "> ❌ אימות ה־ZIP נכשל: $validation_error. צפויים **$expected**, נוספו **$added**, נרשמו **$importer_ids** מזהים (**$unique_ids** ייחודיים), התנגשויות מול seed: **$colliding_ids**."
+      echo "> ❌ בדיקת מבנה ה־ZIP המשלים לא הושלמה בהצלחה."
     fi
+  elif [[ "$SUPPLEMENTAL_ENABLED" == "true" ]]; then
+    echo "> בדיקת ה־ZIP המשלים לא הושלמה או שלא נוצר ZIP."
   else
-    echo "> אימות ה־ZIP המשלים לא בוצע או לא הושלם."
+    echo "> יצירת ZIP משלים לא הופעלה בהרצה זו."
   fi
-
+  echo
+  echo "### בדיקת importer האופציונלית"
+  echo
+  if [[ "$IMPORTER_VALIDATION_ENABLED" == "true" && -s "$IMPORT_VALIDATION_PATH" ]]; then
+    importer_verified=$(jq -r '.verified // false' "$IMPORT_VALIDATION_PATH")
+    expected=$(json_value "$IMPORT_VALIDATION_PATH" '.expectedBooks')
+    added=$(json_value "$IMPORT_VALIDATION_PATH" '.addedBooks')
+    importer_ids=$(json_value "$IMPORT_VALIDATION_PATH" '.importerIds')
+    unique_ids=$(json_value "$IMPORT_VALIDATION_PATH" '.uniqueImporterIds')
+    collisions=$(json_value "$IMPORT_VALIDATION_PATH" '.collidingSeedIds')
+    outbound=$(json_value "$IMPORT_VALIDATION_PATH" '.outboundLinksToSeed')
+    if [[ "$importer_verified" == "true" ]]; then
+      echo "> ✅ בדיקת הייבוא הופעלה ועברה: צפויים **$expected**, נוספו **$added**, נרשמו **$importer_ids** מזהים (**$unique_ids** ייחודיים), התנגשויות: **$collisions**, קישורים לספרי seed: **$outbound**."
+    else
+      importer_error=$(jq -r '.error // "סיבה לא נרשמה"' "$IMPORT_VALIDATION_PATH")
+      echo "> ❌ בדיקת הייבוא האופציונלית הופעלה ונכשלה: $importer_error. צפויים **$expected**, נוספו **$added**, התנגשויות: **$collisions**."
+    fi
+  elif [[ "$IMPORTER_VALIDATION_ENABLED" == "true" ]]; then
+    echo "> בדיקת הייבוא התבקשה אך לא הושלמה. היא רצה רק כאשר גם ה־ZIP המשלים הופעל ונמצאו ספרים משלימים."
+  else
+    echo "> בדיקת הייבוא לא הופעלה. זהו מצב ברירת המחדל, ואין לה השפעה על יצירת קובצי ה־ZIP."
+  fi
   echo
   echo "## 5. קובצי אבחון שנוצרו בהרצה"
   echo
@@ -238,7 +260,6 @@ json_value() { jq -r "$2 // 0" "$1" 2>/dev/null || printf 'לא זמין'; }
       echo "| \`$path\` | לא נוצר | — | $description |"
     fi
   done <<EOF
-build/seed-seforim.db.buildstate|מצב הקצאת המזהים של מסד ה־seed
 build/incremental-sefaria-otzaria.zip|ה־ZIP הרגיל שנוצר
 build/supplemental-sefaria-otzaria.zip|ה־ZIP המשלים שנוצר
 $SEFARIA_REPORT_PATH|דוח הייצוא הרגיל ורשימות המועמדים
@@ -248,7 +269,9 @@ $DOWNLOAD_STATUS_PATH|סטטוס הורדה, סינון וקישורים לכל 
 build/supplemental-merged-files.txt|רשימת קובצי merged שהועברו לייצוא
 build/supplemental-api-links.json|כל קישורי ה־API שנאספו
 $OTZARIA_REPORT_PATH|דוח הייצוא של ה־ZIP המשלים
-$IMPORT_VALIDATION_PATH|תוצאת אימות importer מול מסד ה־seed
+$ZIP_VALIDATION_PATH|בדיקת מבנה, ספירת טקסטים ו־SHA-256 של ה־ZIP המשלים
+$IMPORT_VALIDATION_PATH|תוצאת בדיקת ה־importer האופציונלית
+build/supplemental-validation-book-ids.txt|מזהי הספרים שנוספו בבדיקת ה־importer
 EOF
   echo
   echo "_הערה: רשימת ״סכמות ללא merged.json״ היא רשימת מועמדים רחבה. רשימת ״הספרים העבריים החסרים״ היא התוצאה המאומתת מול גרסאות ה־API של ספריא._"

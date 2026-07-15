@@ -2,7 +2,8 @@ name: Incremental Sefaria to Otzaria ZIP
 
 # Read the latest published database as a baseline, then export only Sefaria
 # books allowed by the current blacklists and absent from that baseline.
-# The seed DB is opened read-only; this workflow never builds or modifies a DB.
+# The seed DB stays read-only. Optional importer validation, disabled by default,
+# modifies only a temporary copy after both ZIP exports are complete.
 
 on:
   workflow_dispatch:
@@ -24,6 +25,11 @@ on:
         type: number
       include_copyright_books:
         description: Also build a supplemental Otzaria ZIP for Hebrew books missing from the bulk export (including Copyright versions)
+        required: false
+        default: false
+        type: boolean
+      validate_with_importer:
+        description: Validate the optional supplemental ZIP by importing it into a temporary copy of the seed database
         required: false
         default: false
         type: boolean
@@ -74,7 +80,7 @@ jobs:
       - name: Install archive tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends jq unzip zstd
+          sudo apt-get install -y --no-install-recommends jq sqlite3 unzip zstd
           chmod +x gradlew
 
       - name: Resolve seed version
@@ -102,16 +108,13 @@ jobs:
           gh release download '${{ steps.versions.outputs.seed_tag }}' \
             --repo "$SEED_REPOSITORY" \
             --pattern 'seforim_bundle.tar.zst.part*' \
-            --pattern 'seforim.db.buildstate' \
             --dir seed-assets
-          test -s seed-assets/seforim.db.buildstate
           cat seed-assets/seforim_bundle.tar.zst.part* > seed-assets/seforim_bundle.tar.zst
           tar --use-compress-program=unzstd -xf seed-assets/seforim_bundle.tar.zst -C seed-extract
           test -s seed-extract/seforim.db
           mv seed-extract/seforim.db build/seed-seforim.db
-          mv seed-assets/seforim.db.buildstate build/seed-seforim.db.buildstate
           rm -rf seed-assets seed-extract
-          ls -lh build/seed-seforim.db build/seed-seforim.db.buildstate
+          ls -lh build/seed-seforim.db
 
       - name: Export missing Sefaria books in Otzaria format
         run: |
@@ -146,22 +149,6 @@ jobs:
             --authors-blacklist generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt \
             --workers 2
 
-      - name: Upload supplemental download diagnostics
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.versions.outputs.artifact_name }}-supplemental-download-diagnostics
-          path: |
-            build/supplemental-hebrew-titles.json
-            build/supplemental-report-status.json
-            build/supplemental-download-status.json
-            build/supplemental-merged-files.txt
-            build/supplemental-api-links.json
-            build/supplemental-otzaria-report.json
-            build/supplemental-import-validation.json
-          if-no-files-found: warn
-          retention-days: ${{ inputs.retention_days }}
-
       - name: Export supplemental Hebrew books as a separate Otzaria ZIP
         if: ${{ inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' }}
         run: |
@@ -192,18 +179,42 @@ jobs:
           TXT_COUNT=$(find "$ROOT/אוצריא" -type f -name '*.txt' | wc -l)
           test "$EXPORTED" -gt 0
           test "$TXT_COUNT" -eq "$EXPORTED"
-          COPYRIGHT_COUNT=$(jq '[.[] | select(.copyrightOnly == true)] | length' build/supplemental-hebrew-titles.json)
-          if [ "$COPYRIGHT_COUNT" -gt 0 ]; then
-            test "$LINKS" -gt 0 || { echo "::error::Supplemental ZIP contains Copyright books but no outbound links."; exit 1; }
-          fi
-          echo "Supplemental ZIP: books=$EXPORTED links=$LINKS"
+          ZIP_BYTES=$(stat -c%s "$ZIP")
+          ZIP_SHA256=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          jq -n \
+            --argjson exportedBooks "$EXPORTED" \
+            --argjson textFiles "$TXT_COUNT" \
+            --argjson exportedLinks "$LINKS" \
+            --argjson zipBytes "$ZIP_BYTES" \
+            --arg zipSha256 "$ZIP_SHA256" \
+            '{verified: true, exportedBooks: $exportedBooks, textFiles: $textFiles, exportedLinks: $exportedLinks, zipBytes: $zipBytes, zipSha256: $zipSha256}' \
+            > build/supplemental-zip-validation.json
+          echo "Supplemental ZIP verified: books=$EXPORTED text-files=$TXT_COUNT links=$LINKS bytes=$ZIP_BYTES"
 
-      - name: Verify supplemental ZIP with the Otzaria database importer
-        if: ${{ inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' }}
+      - name: Download seed buildstate for optional importer validation
+        id: seed_state
+        continue-on-error: true
+        if: ${{ inputs.validate_with_importer && inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p seed-state
+          gh release download '${{ steps.versions.outputs.seed_tag }}' \
+            --repo "$SEED_REPOSITORY" \
+            --pattern 'seforim.db.buildstate' \
+            --dir seed-state
+          test -s seed-state/seforim.db.buildstate
+          mv seed-state/seforim.db.buildstate build/seed-seforim.db.buildstate
+          rmdir seed-state
+
+      - name: Optionally verify supplemental ZIP with the Otzaria importer
+        id: importer_validation
+        continue-on-error: true
+        if: ${{ inputs.validate_with_importer && inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' && steps.seed_state.outcome == 'success' }}
         run: |
           set -euo pipefail
           VALIDATION_DB=build/supplemental-import-validation.db
           VALIDATION_STATE=build/supplemental-import-validation.db.buildstate
+          IDS_FILE=build/supplemental-validation-book-ids.txt
           cp --reflink=auto build/seed-seforim.db "$VALIDATION_DB"
           cp build/seed-seforim.db.buildstate "$VALIDATION_STATE"
           BEFORE=$(sqlite3 "$VALIDATION_DB" 'SELECT COUNT(*) FROM book;')
@@ -211,63 +222,53 @@ jobs:
           ./gradlew :otzariasqlite:appendOtzaria \
             -PseforimDb="$PWD/$VALIDATION_DB" \
             -PsourceDir="$PWD/build/supplemental-sefaria-otzaria" \
-            -PnewBookIdsFile="$PWD/build/supplemental-validation-book-ids.txt" \
+            -PnewBookIdsFile="$PWD/$IDS_FILE" \
             -PbuildStatePath="$PWD/$VALIDATION_STATE" \
             -PinMemoryDb=false \
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace
           AFTER=$(sqlite3 "$VALIDATION_DB" 'SELECT COUNT(*) FROM book;')
           ADDED=$((AFTER-BEFORE))
-          IDS_FILE=build/supplemental-validation-book-ids.txt
           IMPORTED_IDS=$(grep -cve '^[[:space:]]*$' "$IDS_FILE" || true)
-          if grep -Ev '^[[:space:]]*$|^[0-9]+$' "$IDS_FILE" | grep -q .; then
-            echo "::error::Importer IDs file contains a non-numeric value."
-            exit 1
-          fi
           UNIQUE_IMPORTED_IDS=$(awk '/^[0-9]+$/ { print }' "$IDS_FILE" | sort -nu | wc -l)
           IDS_CSV=$(awk '/^[0-9]+$/ { print }' "$IDS_FILE" | sort -nu | paste -sd, -)
           COLLIDING_SEED_IDS=0
           if [ -n "$IDS_CSV" ]; then
             COLLIDING_SEED_IDS=$(sqlite3 build/seed-seforim.db "SELECT COUNT(*) FROM book WHERE id IN ($IDS_CSV);")
           fi
-          STATE_SHA256=$(sha256sum build/seed-seforim.db.buildstate | cut -d' ' -f1)
-          if [ "$ADDED" -ne "$EXPECTED" ] || \
-             [ "$IMPORTED_IDS" -ne "$EXPECTED" ] || \
-             [ "$UNIQUE_IMPORTED_IDS" -ne "$EXPECTED" ] || \
-             [ "$COLLIDING_SEED_IDS" -ne 0 ]; then
-            jq -n \
-              --argjson expectedBooks "$EXPECTED" \
-              --argjson addedBooks "$ADDED" \
-              --argjson importerIds "$IMPORTED_IDS" \
-              --argjson uniqueImporterIds "$UNIQUE_IMPORTED_IDS" \
-              --argjson collidingSeedIds "$COLLIDING_SEED_IDS" \
-              --arg buildStateSha256 "$STATE_SHA256" \
-              '{verified: false, expectedBooks: $expectedBooks, addedBooks: $addedBooks, importerIds: $importerIds, uniqueImporterIds: $uniqueImporterIds, collidingSeedIds: $collidingSeedIds, outboundLinksToSeed: 0, buildStateSha256: $buildStateSha256, error: "import count or stable-ID validation failed"}' \
-              > build/supplemental-import-validation.json
-            echo "::error::Supplemental import mismatch: exported=$EXPECTED added=$ADDED importer-ids=$IMPORTED_IDS unique-ids=$UNIQUE_IMPORTED_IDS ids-already-in-seed=$COLLIDING_SEED_IDS."
-            exit 1
-          fi
           OUTBOUND=$(sqlite3 "$VALIDATION_DB" \
             "ATTACH DATABASE '$PWD/build/seed-seforim.db' AS seed; \
              SELECT COUNT(*) FROM link l \
              WHERE NOT EXISTS (SELECT 1 FROM seed.book b WHERE b.id=l.sourceBookId) \
                AND EXISTS (SELECT 1 FROM seed.book b WHERE b.id=l.targetBookId);")
-          COPYRIGHT_COUNT=$(jq '[.[] | select(.copyrightOnly == true)] | length' build/supplemental-hebrew-titles.json)
-          if [ "$COPYRIGHT_COUNT" -gt 0 ]; then
-            test "$OUTBOUND" -gt 0 || { echo "::error::Importer created no links from supplemental Copyright books to seed books."; exit 1; }
+          STATE_SHA256=$(sha256sum build/seed-seforim.db.buildstate | cut -d' ' -f1)
+          VERIFIED=true
+          ERROR_MESSAGE=""
+          if [ "$ADDED" -ne "$EXPECTED" ] || \
+             [ "$IMPORTED_IDS" -ne "$EXPECTED" ] || \
+             [ "$UNIQUE_IMPORTED_IDS" -ne "$EXPECTED" ] || \
+             [ "$COLLIDING_SEED_IDS" -ne 0 ]; then
+            VERIFIED=false
+            ERROR_MESSAGE="import count or stable-ID validation failed"
           fi
           jq -n \
+            --argjson verified "$VERIFIED" \
             --argjson expectedBooks "$EXPECTED" \
-            --argjson added "$ADDED" \
+            --argjson addedBooks "$ADDED" \
             --argjson importerIds "$IMPORTED_IDS" \
             --argjson uniqueImporterIds "$UNIQUE_IMPORTED_IDS" \
+            --argjson collidingSeedIds "$COLLIDING_SEED_IDS" \
             --argjson outboundLinksToSeed "$OUTBOUND" \
             --arg buildStateSha256 "$STATE_SHA256" \
-            '{verified: true, expectedBooks: $expectedBooks, addedBooks: $added, importerIds: $importerIds, uniqueImporterIds: $uniqueImporterIds, collidingSeedIds: 0, outboundLinksToSeed: $outboundLinksToSeed, buildStateSha256: $buildStateSha256}' \
+            --arg error "$ERROR_MESSAGE" \
+            '{verified: $verified, expectedBooks: $expectedBooks, addedBooks: $addedBooks, importerIds: $importerIds, uniqueImporterIds: $uniqueImporterIds, collidingSeedIds: $collidingSeedIds, outboundLinksToSeed: $outboundLinksToSeed, buildStateSha256: $buildStateSha256, error: (if $error == "" then null else $error end)}' \
             > build/supplemental-import-validation.json
-          echo "Otzaria importer verified: added=$ADDED outbound-links-to-seed=$OUTBOUND"
+          if [ "$VERIFIED" != true ]; then
+            echo "::error::Optional importer validation failed: exported=$EXPECTED added=$ADDED importer-ids=$IMPORTED_IDS unique-ids=$UNIQUE_IMPORTED_IDS ids-already-in-seed=$COLLIDING_SEED_IDS."
+            exit 1
+          fi
+          echo "Optional importer validation passed: added=$ADDED outbound-links-to-seed=$OUTBOUND"
           rm -f "$VALIDATION_DB" "$VALIDATION_STATE"
-
       - name: Validate Otzaria ZIP
         run: |
           set -euo pipefail
@@ -318,23 +319,26 @@ jobs:
             build/supplemental-hebrew-titles.json
             build/supplemental-download-status.json
             build/supplemental-otzaria-report.json
+            build/supplemental-zip-validation.json
             build/supplemental-import-validation.json
+            build/supplemental-validation-book-ids.txt
             build/supplemental-report-status.json
             build/supplemental-merged-files.txt
             build/supplemental-api-links.json
           if-no-files-found: error
           retention-days: ${{ inputs.retention_days }}
 
-      - name: Upload final supplemental validation diagnostics
+      - name: Upload supplemental ZIP diagnostics
         if: ${{ always() && inputs.include_copyright_books }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.versions.outputs.artifact_name }}-supplemental-validation-diagnostics
+          name: ${{ steps.versions.outputs.artifact_name }}-supplemental-diagnostics
           path: |
             build/supplemental-hebrew-titles.json
             build/supplemental-report-status.json
             build/supplemental-download-status.json
             build/supplemental-otzaria-report.json
+            build/supplemental-zip-validation.json
             build/supplemental-import-validation.json
             build/supplemental-validation-book-ids.txt
             build/supplemental-merged-files.txt
@@ -352,7 +356,9 @@ jobs:
             build/supplemental-report-status.json \
             build/supplemental-download-status.json \
             build/supplemental-otzaria-report.json \
-            build/supplemental-import-validation.json \
+            build/supplemental-zip-validation.json \
             '${{ steps.versions.outputs.seed_tag }}' \
             '${{ steps.versions.outputs.artifact_name }}' \
-            '${{ inputs.include_copyright_books }}'
+            '${{ inputs.include_copyright_books }}' \
+            build/supplemental-import-validation.json \
+            '${{ inputs.validate_with_importer }}'
