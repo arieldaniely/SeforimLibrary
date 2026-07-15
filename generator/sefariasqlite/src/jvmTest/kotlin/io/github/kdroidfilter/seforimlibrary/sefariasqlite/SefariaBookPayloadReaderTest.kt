@@ -99,6 +99,61 @@ class SefariaBookPayloadReaderTest {
     }
 
     @Test
+    fun importsDictionaryNodeEntriesWithHeadwordRefs() = runBlocking {
+        val tempDir = Files.createTempDirectory("seforim-dictionary-test")
+        val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+        val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+        val bookDir = Files.createDirectories(jsonDir.resolve("Test Dictionary"))
+        val schemaPath = schemaDir.resolve("Test Dictionary.json")
+
+        Files.writeString(
+            schemaPath,
+            """
+            {
+              "schema": {
+                "title": "Test Dictionary",
+                "heTitle": "מילון בדיקה",
+                "nodes": [{
+                  "key": "Test Dictionary",
+                  "default": true,
+                  "nodeType": "DictionaryNode",
+                  "lexiconName": "Test Lexicon",
+                  "firstWord": "אב",
+                  "lastWord": "אג",
+                  "headwordMap": [["א", "Test Dictionary, אב"]]
+                }]
+              }
+            }
+            """.trimIndent(),
+        )
+        Files.writeString(
+            bookDir.resolve("merged.json"),
+            """
+            {
+              "title": "Test Dictionary",
+              "heTitle": "מילון בדיקה",
+              "text": {"": [
+                {"headword": "אב", "text": "<b>אב</b> הגדרה ראשונה"},
+                {"headword": "אג", "text": "<b>אג</b> הגדרה שנייה"}
+              ]}
+            }
+            """.trimIndent(),
+        )
+
+        val reader = SefariaBookPayloadReader(
+            Json { ignoreUnknownKeys = true; coerceInputValues = true },
+            Logger.withTag("SefariaBookPayloadReaderTest")
+        )
+        val schemaLookup = reader.buildSchemaLookup(schemaDir)
+        val payload = reader.readBooksInParallel(jsonDir, schemaDir, schemaLookup).single()
+
+        assertTrue(payload.lines.contains("<b>אב</b> הגדרה ראשונה"))
+        assertTrue(payload.lines.contains("<b>אג</b> הגדרה שנייה"))
+        assertTrue(payload.refEntries.any { it.ref == "Test Dictionary, אב" && it.heRef == "מילון בדיקה, אב" })
+        assertTrue(payload.refEntries.any { it.ref == "Test Dictionary, אג" && it.heRef == "מילון בדיקה, אג" })
+    }
+
+    @Test
     fun readsArrayAndScalarIndexOffsetsWithoutCrashing() {
         val json = Json { ignoreUnknownKeys = true }
         val reader = SefariaBookPayloadReader(json, Logger.withTag("SefariaBookPayloadReaderTest"))

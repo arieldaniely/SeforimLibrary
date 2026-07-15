@@ -144,11 +144,13 @@ json_value() { jq -r "$2 // 0" "$1" 2>/dev/null || printf 'לא זמין'; }
     echo "| מדד | כמות |"
     echo "|---|---:|"
     jq -r '[
+      ["מצב ההורדה", (.downloadOutcome // "לא ידוע")],
       ["ספרים שהתבקשו", (.requestedBooks // 0)],
       ["סוננו לפני הורדה", ((.blacklistedBeforeDownload // [])|length)],
       ["זכאים לאחר blacklist", (.eligibleAfterBlacklist // 0)],
       ["ספרים שהורדו", (.downloadedBooks // 0)],
       ["גרסאות עבריות שהורדו ומוזגו", (.downloadedHebrewVersions // 0)],
+      ["ערכי מילון מלאים שהורדו", (.downloadedDictionaryEntries // 0)],
       ["קישורים ישירים ב־bulk CSV", (.directBulkLinks // 0)],
       ["קישורים שקיבלו מראה־מקום עברי", (.downloadedApiLinks // 0)],
       ["קישורים שלא נפתרו", (.unresolvedDirectLinks // 0)],
@@ -157,9 +159,9 @@ json_value() { jq -r "$2 // 0" "$1" 2>/dev/null || printf 'לא זמין'; }
     echo
     echo "<details open><summary>תוצאה לכל ספר שהורד</summary>"
     echo
-    echo "| ספר | Schema | גרסאות | קישורים | לא נפתרו |"
-    echo "|---|---|---:|---:|---:|"
-    jq -r '(.completedBooks // []) | if length == 0 then "| אין ספרים שהושלמו | | 0 | 0 | 0 |" else .[] | "| " + (.heTitle // "") + " | `" + (.schemaTitle // "") + "` | " + ((.downloadedVersions // 0)|tostring) + " | " + ((.resolvedLinks // 0)|tostring) + " | " + ((.unresolvedLinks // 0)|tostring) + " |" end' "$DOWNLOAD_STATUS_PATH"
+    echo "| ספר | Schema | גרסאות | ערכי מילון | קישורים | לא נפתרו |"
+    echo "|---|---|---:|---:|---:|---:|"
+    jq -r '(.completedBooks // []) | if length == 0 then "| אין ספרים שהושלמו | | 0 | 0 | 0 | 0 |" else .[] | "| " + (.heTitle // "") + " | `" + (.schemaTitle // "") + "` | " + ((.downloadedVersions // 0)|tostring) + " | " + ((.downloadedDictionaryEntries // 0)|tostring) + " | " + ((.resolvedLinks // 0)|tostring) + " | " + ((.unresolvedLinks // 0)|tostring) + " |" end' "$DOWNLOAD_STATUS_PATH"
     echo
     echo "</details>"
     echo
@@ -171,7 +173,7 @@ json_value() { jq -r "$2 // 0" "$1" 2>/dev/null || printf 'לא זמין'; }
     echo
     echo "<details open><summary>כשלי הורדת ספרים</summary>"
     echo
-    jq -r '(.errors // []) | if length == 0 then "- אין" else .[] | "- **" + (.heTitle // "ללא כותרת") + "**: " + (.error // "שגיאה לא ידועה") end' "$DOWNLOAD_STATUS_PATH"
+    jq -r '(.errors // []) | if length == 0 then "- אין" else .[] | "- **" + (.heTitle // "ללא כותרת") + "** (`" + (.schemaTitle // "ללא schema") + "` / `" + (.title // "ללא כותרת אנגלית") + "`) — " + (.errorType // "Error") + ": " + (.error // "שגיאה לא ידועה") end' "$DOWNLOAD_STATUS_PATH"
     echo
     echo "</details>"
     echo

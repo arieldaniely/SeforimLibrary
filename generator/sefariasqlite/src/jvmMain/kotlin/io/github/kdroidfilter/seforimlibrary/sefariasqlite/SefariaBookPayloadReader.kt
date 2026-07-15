@@ -500,6 +500,26 @@ internal class SefariaBookPayloadReader(
                 )
             }
 
+            if (node["nodeType"]?.stringOrNull() == "DictionaryNode") {
+                val entries = text as? JsonArray ?: return
+                entries.forEach { element ->
+                    val entry = element as? JsonObject ?: return@forEach
+                    val headword = entry["headword"]?.stringOrNull()?.trim().orEmpty()
+                    val content = entry["text"]?.stringOrNull()?.takeIf { it.isNotBlank() } ?: return@forEach
+                    val cleaned = cleanSefariaLine(content)
+                    if (cleaned.isEmpty()) return@forEach
+                    output += cleaned
+                    val ref = listOf(trimTrailingSeparators(refPrefix), headword)
+                        .filter { it.isNotBlank() }
+                        .joinToString(", ")
+                    val heRef = listOf(trimTrailingSeparators(heRefPrefix), headword)
+                        .filter { it.isNotBlank() }
+                        .joinToString(", ")
+                    refs += RefEntry(ref = ref, heRef = heRef, path = "", lineIndex = output.size)
+                }
+                return
+            }
+
             if (text !is JsonArray && text !is JsonPrimitive && text !is JsonObject) return
 
             if (node.containsKey("nodes")) {
@@ -790,8 +810,10 @@ internal class SefariaBookPayloadReader(
     private fun selectNodeText(node: JsonObject, text: JsonElement?): JsonElement? {
         val key = node["key"]?.stringOrNull()
         val title = node["title"]?.stringOrNull().orEmpty()
+        val isDefault = key.equals("default", ignoreCase = true) ||
+            node["default"]?.jsonPrimitive?.booleanOrNull == true
         val obj = text as? JsonObject ?: return null
-        return if (!key.equals("default", ignoreCase = true) && title.isNotBlank()) {
+        return if (!isDefault && title.isNotBlank()) {
             obj[title]
         } else {
             obj[""] ?: obj[title]
