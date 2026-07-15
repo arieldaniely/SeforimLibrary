@@ -11,6 +11,19 @@ import kotlin.test.assertTrue
 
 class SefariaOtzariaExporterTest {
     @Test
+    fun filtersParsedManifestPayloadsAlreadyPresentInSeed() {
+        val existing = payload("Existing Hebrew Title", "Existing Book", "Existing 1:1", "Existing 1", "old")
+        val newBook = payload("New Hebrew Title", "New Book", "New 1:1", "New 1", "new")
+
+        val filtered = filterPayloadsAlreadyInSeed(
+            payloads = listOf(existing, newBook),
+            existingTitleKeys = setOf(normalizeTitleKey("Existing Hebrew Title")!!),
+        )
+
+        assertEquals(listOf(newBook), filtered)
+    }
+
+    @Test
     fun writesOtzariaTextsMetadataManifestAndBidirectionalLinks() {
         val temp = Files.createTempDirectory("sefaria-otzaria-export")
         val linksDir = Files.createDirectories(temp.resolve("source-links"))

@@ -201,7 +201,12 @@ jobs:
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace
           AFTER=$(sqlite3 "$VALIDATION_DB" 'SELECT COUNT(*) FROM book;')
-          test "$((AFTER-BEFORE))" -eq "$EXPECTED"
+          ADDED=$((AFTER-BEFORE))
+          IMPORTED_IDS=$(grep -cve '^[[:space:]]*$' build/copyright-validation-book-ids.txt || true)
+          if [ "$ADDED" -ne "$EXPECTED" ] || [ "$IMPORTED_IDS" -ne "$EXPECTED" ]; then
+            echo "::error::Copyright import count mismatch: exported=$EXPECTED added=$ADDED importer-ids=$IMPORTED_IDS."
+            exit 1
+          fi
           OUTBOUND=$(sqlite3 "$VALIDATION_DB" \
             "ATTACH DATABASE '$PWD/build/seed-seforim.db' AS seed; \
              SELECT COUNT(*) FROM link l \
@@ -209,11 +214,11 @@ jobs:
                AND EXISTS (SELECT 1 FROM seed.book b WHERE b.id=l.targetBookId);")
           test "$OUTBOUND" -gt 0 || { echo "::error::Otzaria importer created no links from Copyright books to seed books."; exit 1; }
           jq -n \
-            --argjson added "$((AFTER-BEFORE))" \
+            --argjson added "$ADDED" \
             --argjson outboundLinksToSeed "$OUTBOUND" \
             '{verified: true, addedBooks: $added, outboundLinksToSeed: $outboundLinksToSeed}' \
             > build/copyright-import-validation.json
-          echo "Otzaria importer verified: added=$((AFTER-BEFORE)) outbound-links-to-seed=$OUTBOUND"
+          echo "Otzaria importer verified: added=$ADDED outbound-links-to-seed=$OUTBOUND"
           rm -f "$VALIDATION_DB"
 
       - name: Validate Otzaria ZIP
