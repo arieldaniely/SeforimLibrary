@@ -1,7 +1,12 @@
 {
-  "generatedAt": "2026-07-15T12:01:43Z",
+  "generatedAt": "2026-07-16T13:40:19Z",
   "latest": null,
   "releases": [
+    {
+      "name": "v2-20260716100122",
+      "publishedAt": "2026-07-16T13:38:58Z",
+      "tagName": "v2-20260716100122"
+    },
     {
       "name": "v2-20260715090053",
       "publishedAt": "2026-07-15T12:00:21Z",
