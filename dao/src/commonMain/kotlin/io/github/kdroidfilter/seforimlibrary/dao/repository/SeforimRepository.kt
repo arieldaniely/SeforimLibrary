@@ -2532,6 +2532,26 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             row.id to row.title
         }
     }
+    /** Lightweight line-index to stable-id mapping for incremental generators. */
+    suspend fun getLineIdsByBookId(bookId: Long): Map<Int, Long> = withContext(Dispatchers.IO) {
+        val result = HashMap<Int, Long>()
+        driver.executeQuery(
+            identifier = null,
+            sql = "SELECT id, lineIndex FROM line WHERE bookId = ? ORDER BY lineIndex",
+            mapper = { cursor: SqlCursor ->
+                while (cursor.next().value) {
+                    val id = cursor.getLong(0)
+                    val lineIndex = cursor.getLong(1)
+                    if (id != null && lineIndex != null) result[lineIndex.toInt()] = id
+                }
+                QueryResult.Value(Unit)
+            },
+            parameters = 1,
+        ) {
+            bindLong(0, bookId)
+        }.await()
+        result
+    }
 
     /**
      * Returns the IDs of all base books (isBaseBook = 1).

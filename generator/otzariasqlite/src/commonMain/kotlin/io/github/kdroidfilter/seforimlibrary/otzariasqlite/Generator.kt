@@ -1465,8 +1465,8 @@ class DatabaseGenerator(
             return 0
         }
 
-        // Skip Otzaria links for books that come from Sefaria (Sefaria links are more accurate)
-        if (sourceBook.id in sefariaBookIds) {
+        // Skip normal Otzaria links for Sefaria books; allow explicitly selected incremental Sefaria ZIP links.
+        if (sourceBook.id in sefariaBookIds && sourceBook.id !in incrementalLinkBookIds.orEmpty()) {
             return 0
         }
 
@@ -1576,8 +1576,8 @@ class DatabaseGenerator(
             return 0
         }
 
-        // Skip Otzaria links for books that come from Sefaria (Sefaria links are more accurate)
-        if (sourceBook.id in sefariaBookIds) {
+        // Skip normal Otzaria links for Sefaria books; allow explicitly selected incremental Sefaria ZIP links.
+        if (sourceBook.id in sefariaBookIds && sourceBook.id !in incrementalLinkBookIds.orEmpty()) {
             return 0
         }
 

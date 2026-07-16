@@ -213,7 +213,7 @@ internal class SefariaOtzariaExporter(
 
             val portablePath = relativePath.invariantSeparatorsPathString
             payload.refEntries.forEach { ref -> refs += ref.copy(path = portablePath) }
-            manifest["sefaria/$portablePath"] = ManifestEntry(sha256(outputFile))
+            manifest["Sefaria/$portablePath"] = ManifestEntry(sha256(outputFile))
             metadata[payload.heTitle] = BookMetadata(
                 title = payload.heTitle,
                 author = payload.authors.firstOrNull(),

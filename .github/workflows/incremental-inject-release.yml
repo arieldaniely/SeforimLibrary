@@ -144,12 +144,44 @@ jobs:
           unzip -t build/incremental-sefaria-otzaria.zip
 
       - name: Build missing Hebrew books report
+        id: supplemental_report
         run: |
           python3 .github/scripts/build-sefaria-copyright-report.py \
             --input build/incremental-sefaria-report.json \
             --output build/supplemental-hebrew-titles.json \
             --status build/supplemental-report-status.json \
             --workers 8
+          echo "count=$(jq 'length' build/supplemental-hebrew-titles.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Download supplemental Hebrew books and outbound links
+        if: ${{ steps.supplemental_report.outputs.count != '0' }}
+        run: |
+          python3 .github/scripts/download-sefaria-copyright-export.py \
+            --report build/supplemental-hebrew-titles.json \
+            --export-root build/sefaria/export \
+            --manifest build/supplemental-merged-files.txt \
+            --links build/supplemental-api-links.json \
+            --status build/supplemental-download-status.json \
+            --books-blacklist generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt \
+            --authors-blacklist generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt \
+            --workers 2
+
+      - name: Export supplemental Hebrew books as an Otzaria ZIP
+        if: ${{ steps.supplemental_report.outputs.count != '0' }}
+        run: |
+          ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
+            -PseedDb="$PWD/build/seforim.db" \
+            -PexportDir="$PWD/build/sefaria/export" \
+            -PmergedFilesList="$PWD/build/supplemental-merged-files.txt" \
+            -PapiLinksPath="$PWD/build/supplemental-api-links.json" \
+            -PreportSource="Sefaria API supplemental Hebrew versions" \
+            -PotzariaOutputDir="$PWD/build/supplemental-sefaria-otzaria" \
+            -PotzariaOutputZip="$PWD/build/supplemental-sefaria-otzaria.zip" \
+            -PincrementalReport="$PWD/build/supplemental-otzaria-report.json" \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+          test -s build/supplemental-sefaria-otzaria.zip
+          unzip -t build/supplemental-sefaria-otzaria.zip
 
       - name: Inject missing Sefaria books
         run: |
@@ -159,6 +191,49 @@ jobs:
             -PbuildVersion='${{ steps.versions.outputs.next_version }}' \
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace
+
+      - name: Inject supplemental Sefaria books and links
+        if: ${{ steps.supplemental_report.outputs.count != '0' }}
+        run: |
+          set -euo pipefail
+          EXPECTED=$(jq '.exportedBooks' build/supplemental-otzaria-report.json)
+          EXPECTED_LINKS=$(jq '.exportedLinks' build/supplemental-otzaria-report.json)
+          if [ "$EXPECTED" -eq 0 ]; then
+            echo "No supplemental books survived export filtering; skipping import."
+            exit 0
+          fi
+          BEFORE=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
+          ./gradlew :otzariasqlite:appendOtzaria \
+            -PseforimDb="$PWD/build/seforim.db" \
+            -PsourceDir="$PWD/build/supplemental-sefaria-otzaria" \
+            -PnewBookIdsFile="$PWD/build/supplemental-new-book-ids.txt" \
+            -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
+            -PinMemoryDb=false \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+          AFTER=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
+          ADDED=$((AFTER-BEFORE))
+          test "$ADDED" -eq "$EXPECTED" || {
+            echo "::error::Supplemental import added $ADDED books; expected $EXPECTED."
+            exit 1
+          }
+          IDS_CSV=$(awk '/^[0-9]+$/ { print }' build/supplemental-new-book-ids.txt | sort -nu | paste -sd, -)
+          IMPORTED_LINKS=0
+          if [ -n "$IDS_CSV" ]; then
+            IMPORTED_LINKS=$(sqlite3 build/seforim.db \
+              "SELECT COUNT(*) FROM link WHERE sourceBookId IN ($IDS_CSV) OR targetBookId IN ($IDS_CSV);")
+          fi
+          if [ "$EXPECTED_LINKS" -gt 0 ] && [ "$IMPORTED_LINKS" -eq 0 ]; then
+            echo "::error::Supplemental ZIP contains $EXPECTED_LINKS links but none reached the database."
+            exit 1
+          fi
+          jq -n \
+            --argjson expectedBooks "$EXPECTED" \
+            --argjson addedBooks "$ADDED" \
+            --argjson exportedLinks "$EXPECTED_LINKS" \
+            --argjson importedLinks "$IMPORTED_LINKS" \
+            '{verified: true, expectedBooks: $expectedBooks, addedBooks: $addedBooks, exportedLinks: $exportedLinks, importedLinks: $importedLinks}' \
+            > build/supplemental-import-validation.json
 
       - name: Inject currently allowed Otzaria books and links
         run: |
@@ -272,6 +347,10 @@ jobs:
           cp build/catalog.pb release-staging/
           cp build/incremental-sefaria-otzaria.zip \
             "release-staging/sefaria-otzaria-${{ steps.versions.outputs.release_tag }}.zip"
+          if [ -s build/supplemental-sefaria-otzaria.zip ]; then
+            cp build/supplemental-sefaria-otzaria.zip \
+              "release-staging/sefaria-supplemental-${{ steps.versions.outputs.release_tag }}.zip"
+          fi
           test -n "$(find release-staging -maxdepth 1 -type f -print -quit)"
           OVER=$(find release-staging -maxdepth 1 -type f -size +2147483647c -print)
           test -z "$OVER" || { echo "::error::Release assets exceed GitHub's 2 GiB limit: $OVER"; exit 1; }
@@ -319,6 +398,10 @@ jobs:
             build/incremental-sefaria-report.json
             build/supplemental-hebrew-titles.json
             build/supplemental-report-status.json
+            build/supplemental-download-status.json
+            build/supplemental-otzaria-report.json
+            build/supplemental-import-validation.json
+            build/supplemental-new-book-ids.txt
             build/injected-books.json
             build/injection-validation.json
             build/otzaria-new-book-ids.txt
