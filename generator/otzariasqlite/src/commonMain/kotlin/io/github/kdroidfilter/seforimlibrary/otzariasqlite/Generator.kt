@@ -184,7 +184,8 @@ class DatabaseGenerator(
     private data class CategoryPlacement(
         val id: Long,
         val leafLevel: Int,
-        val normalizedPath: List<String>
+        val normalizedPath: List<String>,
+        val canonicalPath: List<String>,
     )
 
     private suspend fun findExistingCategory(parentId: Long?, title: String): Category? {
@@ -193,19 +194,22 @@ class DatabaseGenerator(
         return candidates.firstOrNull { comparableLabel(it.title) == targetKey }
     }
 
-    private suspend fun ensureCategoryHierarchy(rawTitle: String, parentId: Long?, startLevel: Int): CategoryPlacement {
+    private suspend fun ensureCategoryHierarchy(
+        rawTitle: String,
+        parentId: Long?,
+        startLevel: Int,
+        canonicalParentPath: List<String>,
+    ): CategoryPlacement {
         val normalizedSegments = normalizeCategorySegments(rawTitle)
         var currentParent = parentId
         var currentLevel = startLevel
         var lastId: Long? = null
-        val pathSoFar = StringBuilder()
 
-        for (title in normalizedSegments) {
-            if (pathSoFar.isNotEmpty()) pathSoFar.append('/')
-            pathSoFar.append(title)
+        for ((index, title) in normalizedSegments.withIndex()) {
+            val fullPath = categoryCanonicalPath(canonicalParentPath, normalizedSegments, index)
             val existing = findExistingCategory(currentParent, title)
             val categoryId = existing?.id ?: bindings.upsertCategory(
-                canonicalPath = pathSoFar.toString(),
+                canonicalPath = fullPath.joinToString("/"),
                 parentId = currentParent,
                 title = title,
                 level = currentLevel,
@@ -220,7 +224,8 @@ class DatabaseGenerator(
         return CategoryPlacement(
             id = finalId,
             leafLevel = currentLevel - 1,
-            normalizedPath = normalizedSegments
+            normalizedPath = normalizedSegments,
+            canonicalPath = canonicalParentPath + normalizedSegments,
         )
     }
 
@@ -388,7 +393,7 @@ class DatabaseGenerator(
                 logger.i { "🚀 Starting to process library directory: $libraryPath" }
                 // Preload all book .txt contents into RAM for faster processing
                 preloadAllBookContents(libraryPath)
-                processDirectory(libraryPath, null, 0, metadata)
+                processDirectory(libraryPath, null, 0, emptyList(), metadata)
 
                 // Process links
                 processLinks()
@@ -504,7 +509,7 @@ class DatabaseGenerator(
                     .onFailure { e -> logger.w(e) { "Failed processing priority list; continuing with full generation (phase 1)" } }
                 // Preload all book .txt contents into RAM for faster processing
                 preloadAllBookContents(libraryPath)
-                processDirectory(libraryPath, null, 0, metadata)
+                processDirectory(libraryPath, null, 0, emptyList(), metadata)
 
                 // Build category closure after categories insertion
                 logger.i { "Building category_closure table (phase 1)..." }
@@ -767,6 +772,7 @@ class DatabaseGenerator(
         directory: Path,
         parentCategoryId: Long?,
         level: Int,
+        canonicalParentPath: List<String>,
         metadata: Map<String, BookMetadata>
     ) {
         logger.i { "=== Processing directory: ${directory.fileName} with parentCategoryId: $parentCategoryId (level: $level) ===" }
@@ -786,10 +792,21 @@ class DatabaseGenerator(
                             continue
                         }
                         logger.d { "Processing subdirectory: ${entry.fileName} with parentId: $parentCategoryId" }
-                        val placement = ensureCategoryHierarchy(entry.fileName.toString(), parentCategoryId, level)
+                        val placement = ensureCategoryHierarchy(
+                            entry.fileName.toString(),
+                            parentCategoryId,
+                            level,
+                            canonicalParentPath,
+                        )
                         val normalizedPath = placement.normalizedPath.joinToString(" / ")
                         logger.i { "✅ Category '${entry.fileName}' normalized to '$normalizedPath' with ID: ${placement.id} (parent: $parentCategoryId)" }
-                        processDirectory(entry, placement.id, placement.leafLevel + 1, metadata)
+                        processDirectory(
+                            entry,
+                            placement.id,
+                            placement.leafLevel + 1,
+                            placement.canonicalPath,
+                            metadata,
+                        )
                     }
 
                     Files.isRegularFile(entry) && entry.extension == "txt" -> {
@@ -1280,10 +1297,12 @@ class DatabaseGenerator(
             // Ensure categories exist and get the final parent category id
             var parentId: Long? = null
             var level = 0
+            var canonicalParentPath = emptyList<String>()
             for (cat in categories) {
-                val placement = ensureCategoryHierarchy(cat, parentId, level)
+                val placement = ensureCategoryHierarchy(cat, parentId, level, canonicalParentPath)
                 parentId = placement.id
                 level = placement.leafLevel + 1
+                canonicalParentPath = placement.canonicalPath
             }
 
             if (parentId == null) {
@@ -1545,13 +1564,18 @@ class DatabaseGenerator(
                         continue
                     }
 
+                    val oriented = orientOtzariaLink(
+                        sourceBook.id, targetBook.id, sourceLineId, targetLineId,
+                        sourceLineIndex, targetLineIndex, linkData.sourceIsDependent,
+                    )
                     val link = Link(
-                        sourceBookId = sourceBook.id,
-                        targetBookId = targetBook.id,
-                        sourceLineId = sourceLineId,
-                        targetLineId = targetLineId,
-                        targetLineIndex = targetLineIndex,
-                        connectionType = ConnectionType.fromString(linkData.connectionType)
+                        sourceBookId = oriented.sourceBookId,
+                        targetBookId = oriented.targetBookId,
+                        sourceLineId = oriented.sourceLineId,
+                        targetLineId = oriented.targetLineId,
+                        targetLineIndex = oriented.targetLineIndex,
+                        connectionType = ConnectionType.fromString(linkData.connectionType),
+                        isDeclaredBase = linkData.sourceIsDependent,
                     )
 
                     logger.d { "Inserting link from book ${sourceBook.id} to book ${targetBook.id}" }
@@ -1630,14 +1654,24 @@ class DatabaseGenerator(
 
                 val connectionType = ConnectionType.fromString(linkData.connectionType)
                 val connectionTypeId = bindings.upsertConnectionType(connectionType.name)
-                val link = Link(
-                    id = allocator.linkId(sourceLineId, targetLineId, connectionTypeId),
+                val oriented = orientOtzariaLink(
                     sourceBookId = sourceBook.id,
                     targetBookId = targetBook.id,
                     sourceLineId = sourceLineId,
                     targetLineId = targetLineId,
+                    sourceLineIndex = sourceLineIndex,
                     targetLineIndex = targetLineIndex,
-                    connectionType = connectionType
+                    sourceIsDependent = linkData.sourceIsDependent,
+                )
+                val link = Link(
+                    id = allocator.linkId(oriented.sourceLineId, oriented.targetLineId, connectionTypeId),
+                    sourceBookId = oriented.sourceBookId,
+                    targetBookId = oriented.targetBookId,
+                    sourceLineId = oriented.sourceLineId,
+                    targetLineId = oriented.targetLineId,
+                    targetLineIndex = oriented.targetLineIndex,
+                    connectionType = connectionType,
+                    isDeclaredBase = linkData.sourceIsDependent,
                 )
                 linkBatch += link
                 linkTouchedBookIds += sourceBook.id
@@ -1972,7 +2006,9 @@ class DatabaseGenerator(
         val path_2: String,
         val line_index_2: Double,
         @SerialName("Conection Type")
-        val connectionType: String = ""
+        val connectionType: String = "",
+        @SerialName("source_is_dependent")
+        val sourceIsDependent: Boolean = false,
     )
 
     /**
@@ -1985,4 +2021,45 @@ class DatabaseGenerator(
         val refs: Map<String, String>
     )
 
+}
+
+internal data class OtzariaLinkOrientation(
+    val sourceBookId: Long,
+    val targetBookId: Long,
+    val sourceLineId: Long,
+    val targetLineId: Long,
+    val targetLineIndex: Int,
+)
+
+internal fun categoryCanonicalPath(
+    canonicalParentPath: List<String>,
+    normalizedSegments: List<String>,
+    segmentIndex: Int,
+): List<String> = canonicalParentPath + normalizedSegments.take(segmentIndex + 1)
+
+/** Converts an Otzaria file edge into the DB's canonical base -> dependant direction. */
+internal fun orientOtzariaLink(
+    sourceBookId: Long,
+    targetBookId: Long,
+    sourceLineId: Long,
+    targetLineId: Long,
+    sourceLineIndex: Int,
+    targetLineIndex: Int,
+    sourceIsDependent: Boolean,
+): OtzariaLinkOrientation = if (sourceIsDependent) {
+    OtzariaLinkOrientation(
+        sourceBookId = targetBookId,
+        targetBookId = sourceBookId,
+        sourceLineId = targetLineId,
+        targetLineId = sourceLineId,
+        targetLineIndex = sourceLineIndex,
+    )
+} else {
+    OtzariaLinkOrientation(
+        sourceBookId = sourceBookId,
+        targetBookId = targetBookId,
+        sourceLineId = sourceLineId,
+        targetLineId = targetLineId,
+        targetLineIndex = targetLineIndex,
+    )
 }

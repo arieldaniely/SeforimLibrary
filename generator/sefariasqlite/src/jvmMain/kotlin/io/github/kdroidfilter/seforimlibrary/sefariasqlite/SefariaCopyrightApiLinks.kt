@@ -90,6 +90,10 @@ internal fun appendCopyrightApiLinks(
                     "heRef_2" to JsonPrimitive(target.heRef),
                     "path_2" to JsonPrimitive(target.path),
                     "Conection Type" to JsonPrimitive(link.connectionType),
+                    // Otzaria link files are keyed by the source book, but the
+                    // database stores oriented dependant links base -> dependant.
+                    // Tell our importer to reverse this API edge on insertion.
+                    "source_is_dependent" to JsonPrimitive(true),
                 )
             )
             additions.getOrPut(sourceTitle) { linkedSetOf() } += entry

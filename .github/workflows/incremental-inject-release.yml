@@ -24,6 +24,11 @@ on:
         required: false
         default: true
         type: boolean
+      include_copyright_books:
+        description: Also inject supplemental Hebrew Sefaria books missing from the bulk export (including Copyright versions)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -147,7 +152,7 @@ jobs:
 
       - name: Build missing Hebrew books report
         id: supplemental_report
-        if: ${{ steps.otzaria_zip_export.outcome == 'success' }}
+        if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' }}
         run: |
           python3 .github/scripts/build-sefaria-copyright-report.py \
             --input build/incremental-sefaria-report.json \
@@ -157,7 +162,7 @@ jobs:
           echo "count=$(jq 'length' build/supplemental-hebrew-titles.json)" >> "$GITHUB_OUTPUT"
 
       - name: Download supplemental Hebrew books and outbound links
-        if: ${{ steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
+        if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
         run: |
           python3 .github/scripts/download-sefaria-copyright-export.py \
             --report build/supplemental-hebrew-titles.json \
@@ -170,7 +175,7 @@ jobs:
             --workers 2
 
       - name: Export supplemental Hebrew books as an Otzaria ZIP
-        if: ${{ steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
+        if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
         run: |
           ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
             -PseedDb="$PWD/build/seforim.db" \
@@ -196,7 +201,7 @@ jobs:
             --no-daemon --stacktrace
 
       - name: Inject supplemental Sefaria books and links
-        if: ${{ steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
+        if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
         run: |
           set -euo pipefail
           EXPECTED=$(jq '.exportedBooks' build/supplemental-otzaria-report.json)
@@ -222,12 +227,22 @@ jobs:
           }
           IDS_CSV=$(awk '/^[0-9]+$/ { print }' build/supplemental-new-book-ids.txt | sort -nu | paste -sd, -)
           IMPORTED_LINKS=0
+          CANONICAL_DEPENDANT_LINKS=0
+          REVERSED_DEPENDANT_LINKS=0
           if [ -n "$IDS_CSV" ]; then
             IMPORTED_LINKS=$(sqlite3 build/seforim.db \
               "SELECT COUNT(*) FROM link WHERE sourceBookId IN ($IDS_CSV) OR targetBookId IN ($IDS_CSV);")
+            CANONICAL_DEPENDANT_LINKS=$(sqlite3 build/seforim.db \
+              "SELECT COUNT(*) FROM link l JOIN connection_type ct ON ct.id=l.connectionTypeId WHERE l.targetBookId IN ($IDS_CSV) AND l.sourceBookId NOT IN ($IDS_CSV) AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL');")
+            REVERSED_DEPENDANT_LINKS=$(sqlite3 build/seforim.db \
+              "SELECT COUNT(*) FROM link l JOIN connection_type ct ON ct.id=l.connectionTypeId WHERE l.sourceBookId IN ($IDS_CSV) AND l.targetBookId NOT IN ($IDS_CSV) AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL');")
           fi
           if [ "$EXPECTED_LINKS" -gt 0 ] && [ "$IMPORTED_LINKS" -eq 0 ]; then
             echo "::error::Supplemental ZIP contains $EXPECTED_LINKS links but none reached the database."
+            exit 1
+          fi
+          if [ "$REVERSED_DEPENDANT_LINKS" -ne 0 ]; then
+            echo "::error::Found $REVERSED_DEPENDANT_LINKS supplemental dependant links stored as dependant->base."
             exit 1
           fi
           jq -n \
@@ -235,7 +250,9 @@ jobs:
             --argjson addedBooks "$ADDED" \
             --argjson exportedLinks "$EXPECTED_LINKS" \
             --argjson importedLinks "$IMPORTED_LINKS" \
-            '{verified: true, expectedBooks: $expectedBooks, addedBooks: $addedBooks, exportedLinks: $exportedLinks, importedLinks: $importedLinks}' \
+            --argjson canonicalDependantLinks "$CANONICAL_DEPENDANT_LINKS" \
+            --argjson reversedDependantLinks "$REVERSED_DEPENDANT_LINKS" \
+            '{verified: true, expectedBooks: $expectedBooks, addedBooks: $addedBooks, exportedLinks: $exportedLinks, importedLinks: $importedLinks, canonicalDependantLinks: $canonicalDependantLinks, reversedDependantLinks: $reversedDependantLinks}' \
             > build/supplemental-import-validation.json
 
       - name: Inject currently allowed Otzaria books and links
@@ -255,6 +272,11 @@ jobs:
           ./gradlew :sefariasqlite:renameCategories \
             -PseforimDb="$PWD/build/seforim.db" \
             --no-daemon --stacktrace
+          DUPLICATE_CATEGORIES=$(sqlite3 build/seforim.db "SELECT COUNT(*) FROM (SELECT title, parentId FROM category GROUP BY title, parentId HAVING COUNT(*) > 1);")
+          if [ "$DUPLICATE_CATEGORIES" -ne 0 ]; then
+            echo "::error::Found $DUPLICATE_CATEGORIES duplicate sibling category groups after normalization."
+            exit 1
+          fi
           AFTER_BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
           AFTER_LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
           if [ "$AFTER_BOOKS" -le '${{ steps.seed_counts.outputs.books }}' ]; then

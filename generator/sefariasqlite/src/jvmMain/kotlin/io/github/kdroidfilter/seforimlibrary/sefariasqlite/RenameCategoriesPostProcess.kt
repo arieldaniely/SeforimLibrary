@@ -75,8 +75,14 @@ fun main(args: Array<String>) {
                 }
             }
 
+            val duplicateCategoriesMerged = mergeDuplicateSiblingCategories(conn, logger)
+            rebuildCategoryClosure(conn)
+
             conn.commit()
-            logger.i { "Category processing complete. Renamed: $totalRenamed, Merged: $totalMerged books" }
+            logger.i {
+                "Category processing complete. Renamed: $totalRenamed, Merged: $totalMerged books, " +
+                    "duplicate categories merged: $duplicateCategoriesMerged"
+            }
         }
     } catch (e: Exception) {
         logger.e(e) { "Failed to process categories" }
@@ -177,10 +183,113 @@ private fun moveBooksToCategory(conn: Connection, fromCategoryId: Long, toCatego
 }
 
 private fun moveSubcategoriesToParent(conn: Connection, fromCategoryId: Long, toParentId: Long): Int {
-    conn.prepareStatement("UPDATE category SET parentId = ? WHERE parentId = ?").use { stmt ->
-        stmt.setLong(1, toParentId)
-        stmt.setLong(2, fromCategoryId)
-        return stmt.executeUpdate()
+    var moved = 0
+    for ((childId, childTitle) in findChildren(conn, fromCategoryId)) {
+        val matchingTargetId = findChildByTitle(conn, toParentId, childTitle)
+        if (matchingTargetId != null && matchingTargetId != childId) {
+            mergeCategoryTree(conn, childId, matchingTargetId)
+        } else {
+            conn.prepareStatement("UPDATE category SET parentId = ? WHERE id = ?").use { stmt ->
+                stmt.setLong(1, toParentId)
+                stmt.setLong(2, childId)
+                moved += stmt.executeUpdate()
+            }
+        }
+    }
+    return moved
+}
+
+/** Merges categories that already have the same title and parent, without requiring a rename. */
+private fun mergeDuplicateSiblingCategories(conn: Connection, logger: Logger): Int {
+    var totalMerged = 0
+    while (true) {
+        val duplicateGroup = findFirstDuplicateSiblingGroup(conn) ?: break
+        val targetId = duplicateGroup.first()
+        for (sourceId in duplicateGroup.drop(1)) {
+            mergeCategoryTree(conn, sourceId, targetId)
+            totalMerged++
+            logger.i { "Merged duplicate sibling category id=$sourceId into id=$targetId" }
+        }
+    }
+    return totalMerged
+}
+
+private fun findFirstDuplicateSiblingGroup(conn: Connection): List<Long>? {
+    val sql = """
+        SELECT id
+        FROM category
+        WHERE title = ?
+          AND ((parentId = ?) OR (parentId IS NULL AND ? IS NULL))
+        ORDER BY id
+    """.trimIndent()
+    conn.prepareStatement(
+        """
+        SELECT title, parentId
+        FROM category
+        GROUP BY title, parentId
+        HAVING COUNT(*) > 1
+        LIMIT 1
+        """.trimIndent()
+    ).use { groupStmt ->
+        groupStmt.executeQuery().use { groupRs ->
+            if (!groupRs.next()) return null
+            val title = groupRs.getString(1)
+            val parentId = groupRs.getLong(2).takeUnless { groupRs.wasNull() }
+            conn.prepareStatement(sql).use { idsStmt ->
+                idsStmt.setString(1, title)
+                if (parentId == null) {
+                    idsStmt.setNull(2, java.sql.Types.BIGINT)
+                    idsStmt.setNull(3, java.sql.Types.BIGINT)
+                } else {
+                    idsStmt.setLong(2, parentId)
+                    idsStmt.setLong(3, parentId)
+                }
+                idsStmt.executeQuery().use { idsRs ->
+                    return buildList { while (idsRs.next()) add(idsRs.getLong(1)) }
+                }
+            }
+        }
+    }
+}
+
+private fun findChildren(conn: Connection, parentId: Long): List<Pair<Long, String>> =
+    conn.prepareStatement("SELECT id, title FROM category WHERE parentId = ? ORDER BY id").use { stmt ->
+        stmt.setLong(1, parentId)
+        stmt.executeQuery().use { rs ->
+            buildList { while (rs.next()) add(rs.getLong(1) to rs.getString(2)) }
+        }
+    }
+
+private fun findChildByTitle(conn: Connection, parentId: Long, title: String): Long? =
+    conn.prepareStatement("SELECT id FROM category WHERE parentId = ? AND title = ? ORDER BY id LIMIT 1").use { stmt ->
+        stmt.setLong(1, parentId)
+        stmt.setString(2, title)
+        stmt.executeQuery().use { rs -> if (rs.next()) rs.getLong(1) else null }
+    }
+
+private fun mergeCategoryTree(conn: Connection, sourceId: Long, targetId: Long) {
+    moveBooksToCategory(conn, sourceId, targetId)
+    moveSubcategoriesToParent(conn, sourceId, targetId)
+    deleteCategory(conn, sourceId)
+}
+
+/** Rebuilds the transitive closure after category moves and merges. */
+private fun rebuildCategoryClosure(conn: Connection) {
+    conn.createStatement().use { stmt ->
+        stmt.executeUpdate("DELETE FROM category_closure")
+        stmt.executeUpdate(
+            """
+            INSERT OR IGNORE INTO category_closure (ancestorId, descendantId)
+            WITH RECURSIVE descendants(ancestorId, descendantId) AS (
+                SELECT id, id FROM category
+                UNION ALL
+                SELECT descendants.ancestorId, category.id
+                FROM descendants
+                JOIN category ON category.parentId = descendants.descendantId
+            )
+            SELECT ancestorId, descendantId FROM descendants
+            """.trimIndent()
+        )
     }
 }
 
