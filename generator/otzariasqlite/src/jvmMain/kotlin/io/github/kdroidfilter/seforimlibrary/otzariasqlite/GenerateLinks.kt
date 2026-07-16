@@ -35,6 +35,8 @@ fun main(args: Array<String>) = runBlocking {
         ?: System.getProperty("sourceDir")
         ?: System.getenv("OTZARIA_SOURCE_DIR")
         ?: OtzariaFetcher.ensureLocalSource(logger).toString()
+    val linksDir = System.getProperty("linksDir")
+        ?: System.getenv("OTZARIA_LINKS_DIR")
     val incrementalBookIds = (System.getProperty("newBookIdsFile")
         ?: System.getenv("NEW_BOOK_IDS_FILE"))?.let { rawPath ->
         val path = Paths.get(rawPath)
@@ -102,6 +104,7 @@ fun main(args: Array<String>) = runBlocking {
             sourceDirectory = Paths.get(sourceDir),
             repository = repository,
             acronymDbPath = null,
+            linksDirectory = linksDir?.let(Paths::get),
             filterSourcesForLinks = false,
             allocator = allocator,
             incrementalLinkBookIds = incrementalBookIds,
