@@ -132,6 +132,8 @@ jobs:
           echo "Seed counts: books=$BOOKS lines=$LINES"
 
       - name: Export missing Sefaria books as an Otzaria ZIP
+        id: otzaria_zip_export
+        continue-on-error: true
         run: |
           ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
             -PseedDb="$PWD/build/seforim.db" \
@@ -145,6 +147,7 @@ jobs:
 
       - name: Build missing Hebrew books report
         id: supplemental_report
+        if: ${{ steps.otzaria_zip_export.outcome == 'success' }}
         run: |
           python3 .github/scripts/build-sefaria-copyright-report.py \
             --input build/incremental-sefaria-report.json \
@@ -154,7 +157,7 @@ jobs:
           echo "count=$(jq 'length' build/supplemental-hebrew-titles.json)" >> "$GITHUB_OUTPUT"
 
       - name: Download supplemental Hebrew books and outbound links
-        if: ${{ steps.supplemental_report.outputs.count != '0' }}
+        if: ${{ steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
         run: |
           python3 .github/scripts/download-sefaria-copyright-export.py \
             --report build/supplemental-hebrew-titles.json \
@@ -167,7 +170,7 @@ jobs:
             --workers 2
 
       - name: Export supplemental Hebrew books as an Otzaria ZIP
-        if: ${{ steps.supplemental_report.outputs.count != '0' }}
+        if: ${{ steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
         run: |
           ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
             -PseedDb="$PWD/build/seforim.db" \
@@ -193,7 +196,7 @@ jobs:
             --no-daemon --stacktrace
 
       - name: Inject supplemental Sefaria books and links
-        if: ${{ steps.supplemental_report.outputs.count != '0' }}
+        if: ${{ steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
         run: |
           set -euo pipefail
           EXPECTED=$(jq '.exportedBooks' build/supplemental-otzaria-report.json)
@@ -345,8 +348,12 @@ jobs:
           cp build/package/seforim_bundle.tar.zst.part* release-staging/
           cp build/seforim.db.buildstate release-staging/
           cp build/catalog.pb release-staging/
-          cp build/incremental-sefaria-otzaria.zip \
-            "release-staging/sefaria-otzaria-${{ steps.versions.outputs.release_tag }}.zip"
+          if [ -s build/incremental-sefaria-otzaria.zip ]; then
+            cp build/incremental-sefaria-otzaria.zip \
+              "release-staging/sefaria-otzaria-${{ steps.versions.outputs.release_tag }}.zip"
+          else
+            echo "::warning::The optional Otzaria ZIP was not created; publishing the database release without it."
+          fi
           if [ -s build/supplemental-sefaria-otzaria.zip ]; then
             cp build/supplemental-sefaria-otzaria.zip \
               "release-staging/sefaria-supplemental-${{ steps.versions.outputs.release_tag }}.zip"

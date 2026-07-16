@@ -684,7 +684,7 @@ internal fun discoverExternalLinkSchemas(
                             else -> null
                         } ?: continue
                         val schema = schemaForCitation(external)
-                        if (schema != null) found += schema else unresolved++
+                        if (schema != null) found.add(schema) else unresolved++
                     }
                 }
             }
