@@ -51,6 +51,14 @@ class CompositeSearchEngine(
 
     override fun buildHighlightTerms(query: String): List<String> = base.buildHighlightTerms(query)
 
+    override suspend fun semanticSpan(query: String, text: String): String? =
+        base.semanticSpan(query, text)
+
+    override suspend fun semanticFind(query: String, bookId: Long, limit: Int): List<Long> =
+        base.semanticFind(query, bookId, limit)
+
+    override suspend fun denseReady(): Boolean = base.denseReady()
+
     override fun computeFacets(
         query: String,
         near: Int,

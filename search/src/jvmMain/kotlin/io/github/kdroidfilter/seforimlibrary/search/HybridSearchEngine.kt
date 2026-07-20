@@ -102,6 +102,9 @@ class HybridSearchEngine(
     override fun buildSnippet(rawText: String, query: String, near: Int): String =
         lexical.buildSnippet(rawText, query, near)
 
+    override fun buildHighlightTerms(query: String): List<String> =
+        lexical.buildHighlightTerms(query)
+
     /**
      * Picks the passage of [text] closest in meaning to [query], using the SAME dense
      * encoder as semantic search — so the highlight reflects meaning instead of scattering
