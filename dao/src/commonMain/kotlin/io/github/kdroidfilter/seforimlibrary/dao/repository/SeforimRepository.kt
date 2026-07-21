@@ -485,13 +485,14 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     }
 
     /**
-     * Lightweight helper for commentary flows: loads core book data and publication
-     * dates without joining authors, topics, or publication places.
+     * Lightweight helper for commentary flows: loads core book data, authors and publication
+     * dates without the unrelated topic and publication-place queries.
      */
     suspend fun getBookWithPubDates(id: Long): Book? = withContext(Dispatchers.IO) {
         val bookData = database.bookQueriesQueries.selectById(id).executeAsOneOrNull() ?: return@withContext null
+        val authors = getBookAuthors(bookData.id)
         val pubDates = getBookPubDates(bookData.id)
-        return@withContext bookData.toModel(json, pubDates = pubDates)
+        return@withContext bookData.toModel(json, authors = authors, pubDates = pubDates)
     }
 
     /**
@@ -1723,6 +1724,28 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     )
                 }
         }
+
+    /** Resolves commentary navigation without materializing a page of commentary text. */
+    suspend fun getFirstCommentaryTargetLineId(
+        sourceLineIds: List<Long>,
+        commentatorBookId: Long,
+    ): Long? = withContext(Dispatchers.IO) {
+        if (sourceLineIds.isEmpty()) return@withContext null
+        database.linkQueriesQueries
+            .selectFirstTargetLineIdBySourceLinesAndBook(sourceLineIds, commentatorBookId)
+            .executeAsOneOrNull()
+    }
+
+    /** Resolves inverse/source navigation without loading the linked content. */
+    suspend fun getFirstSourceTargetLineId(
+        targetLineIds: List<Long>,
+        sourceBookId: Long,
+    ): Long? = withContext(Dispatchers.IO) {
+        if (targetLineIds.isEmpty()) return@withContext null
+        database.linkQueriesQueries
+            .selectFirstSourceLineIdByTargetLinesAndBook(targetLineIds, sourceBookId)
+            .executeAsOneOrNull()
+    }
 
     // New paginated methods for per-commentator pagination use cases
     suspend fun getCommentariesForLineRange(

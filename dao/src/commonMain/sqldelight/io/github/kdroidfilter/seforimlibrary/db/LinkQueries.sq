@@ -38,6 +38,20 @@ WHERE l.sourceLineId IN ? AND l.targetBookId IN ?
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex
 LIMIT ? OFFSET ?;
 
+-- Navigation only: resolve the first displayed commentary without loading its text or JOIN metadata.
+selectFirstTargetLineIdBySourceLinesAndBook:
+SELECT l.targetLineId FROM link l
+WHERE l.sourceLineId IN ? AND l.targetBookId = ?
+ORDER BY l.targetBookOrderIndex, l.targetLineIndex
+LIMIT 1;
+
+-- Mirror navigation query used when opening a source book from a dependant line.
+selectFirstSourceLineIdByTargetLinesAndBook:
+SELECT l.sourceLineId FROM link l
+WHERE l.targetLineId IN ? AND l.sourceBookId = ?
+ORDER BY l.isDeclaredBase DESC, l.targetLineIndex
+LIMIT 1;
+
 selectLinksBySourceLineIdsAndTypesPaged:
 SELECT l.*, ct.name AS connectionType, b.title AS targetBookTitle, tl.content AS targetText
 FROM link l
