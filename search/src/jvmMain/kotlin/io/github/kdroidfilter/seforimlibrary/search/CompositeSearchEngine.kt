@@ -1,5 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.search
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import java.util.ArrayDeque
 
 /**
@@ -104,16 +106,14 @@ private class MergedSearchSession(
     private var firstTotal = 0L
     private var secondTotal = 0L
 
-    override suspend fun nextPage(limit: Int): SearchPage? {
+    override suspend fun nextPage(limit: Int): SearchPage? = coroutineScope {
         require(limit > 0) { "limit must be positive" }
-        fill(first, firstBuffer, limit, isFirst = true)
-        fill(second, secondBuffer, limit, isFirst = false)
-        if (firstBuffer.isEmpty() && secondBuffer.isEmpty()) return null
+        fillBoth(limit)
+        if (firstBuffer.isEmpty() && secondBuffer.isEmpty()) return@coroutineScope null
 
         val hits = ArrayList<LineHit>(limit)
         while (hits.size < limit) {
-            fill(first, firstBuffer, limit, isFirst = true)
-            fill(second, secondBuffer, limit, isFirst = false)
+            fillBoth(limit)
             val left = firstBuffer.firstOrNull()
             val right = secondBuffer.firstOrNull()
             val next = when {
@@ -124,7 +124,14 @@ private class MergedSearchSession(
             hits += next
         }
         val last = firstFinished && secondFinished && firstBuffer.isEmpty() && secondBuffer.isEmpty()
-        return SearchPage(hits, firstTotal + secondTotal, last)
+        SearchPage(hits, firstTotal + secondTotal, last)
+    }
+
+    private suspend fun fillBoth(limit: Int) = coroutineScope {
+        val firstFill = async { fill(first, firstBuffer, limit, isFirst = true) }
+        val secondFill = async { fill(second, secondBuffer, limit, isFirst = false) }
+        firstFill.await()
+        secondFill.await()
     }
 
     private suspend fun fill(
