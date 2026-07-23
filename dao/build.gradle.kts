@@ -36,6 +36,7 @@ kotlin {
         }
 
         jvmTest.dependencies {
+            implementation(kotlin("test-junit"))
             implementation(libs.sqlDelight.driver.sqlite)
         }
 

@@ -528,6 +528,38 @@ class SeforimRepositoryIntegrationTest {
 
     // ==================== Virtual SOURCE view tests ====================
 
+    @Test
+    fun `SOURCE view includes inbound reference links from mentioning books`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val verseBookId = repository.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Verse", order = 1f, isBaseBook = true)
+        )
+        val gemaraBookId = repository.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Gemara", order = 2f, isBaseBook = false)
+        )
+        val verseLineId = repository.insertLine(Line(bookId = verseBookId, lineIndex = 0, content = "Verse text"))
+        val gemaraLineId = repository.insertLine(Line(bookId = gemaraBookId, lineIndex = 0, content = "Gemara quote"))
+
+        repository.insertLink(
+            Link(
+                sourceBookId = gemaraBookId,
+                targetBookId = verseBookId,
+                sourceLineId = gemaraLineId,
+                targetLineId = verseLineId,
+                targetLineIndex = 0,
+                connectionType = ConnectionType.REFERENCE,
+            )
+        )
+
+        val sources = repository.getSourceSummariesForLines(listOf(verseLineId))
+
+        assertEquals(1, sources.size)
+        assertEquals(gemaraBookId, sources.first().link.sourceBookId)
+        assertEquals(verseBookId, sources.first().link.targetBookId)
+        assertEquals(ConnectionType.SOURCE, sources.first().link.connectionType)
+    }
+
     // Validates the single-direction storage + virtual SOURCE view contract:
     // a stored COMMENTARY link base→dep MUST be visible both as a COMMENTARY
     // outgoing from the base line and as a SOURCE incoming to the dep line.
