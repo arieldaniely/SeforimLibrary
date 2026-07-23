@@ -529,7 +529,7 @@ class SeforimRepositoryIntegrationTest {
     // ==================== Virtual SOURCE view tests ====================
 
     @Test
-    fun `SOURCE view includes inbound reference links from mentioning books`() = runBlocking {
+    fun `SOURCE and MENTION views separate inbound base links and outbound citation links`() = runBlocking {
         val sourceId = repository.insertSource("Test")
         val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
         val verseBookId = repository.insertBook(
@@ -543,21 +543,34 @@ class SeforimRepositoryIntegrationTest {
 
         repository.insertLink(
             Link(
-                sourceBookId = gemaraBookId,
-                targetBookId = verseBookId,
-                sourceLineId = gemaraLineId,
-                targetLineId = verseLineId,
+                sourceBookId = verseBookId,
+                targetBookId = gemaraBookId,
+                sourceLineId = verseLineId,
+                targetLineId = gemaraLineId,
                 targetLineIndex = 0,
                 connectionType = ConnectionType.REFERENCE,
             )
         )
 
-        val sources = repository.getSourceSummariesForLines(listOf(verseLineId))
+        // From Gemara line (target side), the Verse is a SOURCE.
+        val gemaraSources = repository.getSourceSummariesForLines(listOf(gemaraLineId))
+        assertEquals(1, gemaraSources.size)
+        assertEquals(verseBookId, gemaraSources.first().link.targetBookId)
+        assertEquals(ConnectionType.SOURCE, gemaraSources.first().link.connectionType)
 
-        assertEquals(1, sources.size)
-        assertEquals(gemaraBookId, sources.first().link.sourceBookId)
-        assertEquals(verseBookId, sources.first().link.targetBookId)
-        assertEquals(ConnectionType.SOURCE, sources.first().link.connectionType)
+        // From Verse line (source side), the Gemara is a MENTION.
+        val verseMentions = repository.getMentionSummariesForLines(listOf(verseLineId))
+        assertEquals(1, verseMentions.size)
+        assertEquals(gemaraBookId, verseMentions.first().link.targetBookId)
+        assertEquals(ConnectionType.MENTION, verseMentions.first().link.connectionType)
+
+        // Verse has no sources in Gemara.
+        val verseSources = repository.getSourceSummariesForLines(listOf(verseLineId))
+        assertEquals(0, verseSources.size)
+
+        // Gemara has no mentions in Verse.
+        val gemaraMentions = repository.getMentionSummariesForLines(listOf(gemaraLineId))
+        assertEquals(0, gemaraMentions.size)
     }
 
     // Validates the single-direction storage + virtual SOURCE view contract:
