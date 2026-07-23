@@ -209,7 +209,7 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
@@ -228,7 +228,7 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
@@ -248,7 +248,7 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex
 LIMIT ? OFFSET ?;
@@ -269,7 +269,7 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex
 LIMIT ? OFFSET ?;
@@ -290,7 +290,7 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 GROUP BY l.sourceLineId
 ORDER BY MAX(l.isDeclaredBase) DESC, b.isBaseBook DESC, b.orderIndex, MIN(sl.lineIndex)
@@ -312,7 +312,7 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 GROUP BY l.sourceLineId
 ORDER BY MAX(l.isDeclaredBase) DESC, b.isBaseBook DESC, b.orderIndex, MIN(sl.lineIndex)
@@ -324,7 +324,7 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
@@ -334,7 +334,7 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
@@ -347,7 +347,7 @@ JOIN book b ON l.sourceBookId = b.id
 LEFT JOIN book_author ba ON b.id = ba.bookId
 LEFT JOIN author a ON ba.authorId = a.id
 WHERE l.targetBookId = ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','OTHER','REFERENCE')
   AND l.sourceBookId != l.targetBookId
 GROUP BY l.sourceBookId, b.title, a.name
 ORDER BY MAX(l.isDeclaredBase) DESC, b.isBaseBook DESC, b.orderIndex, b.title;

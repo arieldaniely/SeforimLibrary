@@ -11,4 +11,17 @@ package io.github.kdroidfilter.seforimlibrary.dao.repository
  */
 interface LinkPartitionQueryDriver {
     fun <T> queryEachLinkPartition(query: () -> T): List<T>
+
+    /**
+     * Runs an inverse-link query only against partitions that can contain one of
+     * [targetLineIds]. Implementations may use an exact side index to avoid touching
+     * an attached overlay when none of the requested lines are targeted there.
+     */
+    fun <T> queryEachLinkPartitionForTargetLines(
+        targetLineIds: Collection<Long>,
+        query: () -> T,
+    ): List<T> = queryEachLinkPartition(query)
+
+    /** True when an attached partition contains links targeting [bookId]. */
+    fun hasAdditionalLinksTargetingBook(bookId: Long): Boolean = false
 }

@@ -59,6 +59,18 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     private fun <T> queryAllLinkPartitions(query: () -> List<T>): List<T> =
         queryEachLinkPartition(query).flatten()
 
+    private fun <T> queryAllLinkPartitionsForTargetLines(
+        targetLineIds: Collection<Long>,
+        query: () -> List<T>,
+    ): List<T> =
+        (driver as? LinkPartitionQueryDriver)
+            ?.queryEachLinkPartitionForTargetLines(targetLineIds, query)
+            ?.flatten()
+            ?: query()
+
+    fun hasAdditionalLinksTargetingBook(bookId: Long): Boolean =
+        (driver as? LinkPartitionQueryDriver)?.hasAdditionalLinksTargetingBook(bookId) == true
+
     private fun resolveBookOrderIndex(bookId: Long): Long =
         bookOrderIndexCache.getOrPut(bookId) {
             database.bookQueriesQueries.selectOrderIndexById(bookId).executeAsOneOrNull() ?: 0L
@@ -1651,7 +1663,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 )
             }
         if (!includeSources) return@withContext forward
-        val inverse = queryAllLinkPartitions {
+        val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
             database.linkQueriesQueries.selectInverseLinksByTargetLineIds(lineIds).executeAsList()
         }
             .filter { activeCommentatorIds.isEmpty() || it.targetBookId in activeCommentatorIds }
@@ -1701,7 +1713,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 )
             }
         if (!includeSources) return@withContext forward
-        val inverse = queryAllLinkPartitions {
+        val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
             database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(lineIds).executeAsList()
         }
             .filter { activeCommentatorIds.isEmpty() || it.targetBookId in activeCommentatorIds }
@@ -1899,7 +1911,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             // Fetch only the prefix needed for this page, then page the small merged result.
             val pageWindow = (offset.toLong() + limit.toLong()).coerceAtLeast(0L)
             val rows =
-                queryAllLinkPartitions {
+                queryAllLinkPartitionsForTargetLines(lineIds) {
                     when {
                         activeSourceBookIds.isEmpty() && useDistinct ->
                             database.linkQueriesQueries.selectInverseLinksByTargetLineIdsPagedDistinct(
@@ -2099,13 +2111,13 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 "SOURCE cannot be mixed with other connection types in a single query"
             }
             val rows = if (activeCommentatorIds.isEmpty()) {
-                queryAllLinkPartitions {
+                queryAllLinkPartitionsForTargetLines(lineIds) {
                     database.linkQueriesQueries
                         .selectInverseLinkCharCountsByTargetLineIds(lineIds)
                         .executeAsList()
                 }
             } else {
-                queryAllLinkPartitions {
+                queryAllLinkPartitionsForTargetLines(lineIds) {
                     database.linkQueriesQueries
                         .selectInverseLinkCharCountsByTargetLineIdsAndSources(
                             lineIds,
