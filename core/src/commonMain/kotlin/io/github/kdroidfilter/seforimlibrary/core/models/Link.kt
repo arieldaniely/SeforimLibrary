@@ -48,7 +48,7 @@ data class Link(
 /**
  * Types of connections between texts.
  *
- * Persisted types are everything except [SOURCE]. [SOURCE] is a virtual type
+ * [SOURCE] and [MENTION] are virtual repository views; all other values are persisted types. [SOURCE] is
  * exposed by the repository when answering "what does this line comment on?"
  * — it is derived by querying `targetLineId` of stored COMMENTARY/TARGUM/etc.
  * links and swapping source/target columns at read time.
@@ -62,6 +62,9 @@ enum class ConnectionType {
 
     /** Virtual: never stored. Derived by the repository from reverse-direction links. */
     SOURCE,
+
+    /** Virtual: never stored. REFERENCE/OTHER links touching this text, in either stored direction. */
+    MENTION,
 
     MIDRASH,
     QUOTATION,
@@ -90,6 +93,7 @@ enum class ConnectionType {
                 "targum" -> TARGUM
                 "reference" -> REFERENCE
                 "source" -> SOURCE
+                "mention" -> MENTION
                 "midrash" -> MIDRASH
                 "quotation", "quotation_auto", "quotation_auto_tanakh" -> QUOTATION
                 "mesorat_hashas" -> MESORAT_HASHAS

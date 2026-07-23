@@ -40,6 +40,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     private val database = SeforimDb(driver)
     private val json = Json { ignoreUnknownKeys = true }
     private val logger = Logger.withTag("SeforimRepository")
+    private val sourceConnectionTypeNames =
+        listOf("COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH", "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT")
+    private val mentionConnectionTypeNames = listOf("REFERENCE", "OTHER")
 
     // Category rows are immutable at runtime, so a plain read-through cache avoids
     // paying a SQLite prepare + connection round-trip for every breadcrumb/tree walk.
@@ -70,6 +73,12 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
 
     fun hasAdditionalLinksTargetingBook(bookId: Long): Boolean =
         (driver as? LinkPartitionQueryDriver)?.hasAdditionalLinksTargetingBook(bookId) == true
+
+    fun hasAdditionalSourceLinksTargetingBook(bookId: Long): Boolean =
+        (driver as? LinkPartitionQueryDriver)?.hasAdditionalSourceLinksTargetingBook(bookId) == true
+
+    fun hasAdditionalMentionLinksForBook(bookId: Long): Boolean =
+        (driver as? LinkPartitionQueryDriver)?.hasAdditionalMentionLinksForBook(bookId) == true
 
     private fun resolveBookOrderIndex(bookId: Long): Long =
         bookOrderIndexCache.getOrPut(bookId) {
@@ -1664,7 +1673,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             }
         if (!includeSources) return@withContext forward
         val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
-            database.linkQueriesQueries.selectInverseLinksByTargetLineIds(lineIds).executeAsList()
+            database.linkQueriesQueries.selectInverseLinksByTargetLineIds(lineIds, sourceConnectionTypeNames).executeAsList()
         }
             .filter { activeCommentatorIds.isEmpty() || it.targetBookId in activeCommentatorIds }
             .map {
@@ -1714,7 +1723,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             }
         if (!includeSources) return@withContext forward
         val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
-            database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(lineIds).executeAsList()
+            database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(lineIds, sourceConnectionTypeNames).executeAsList()
         }
             .filter { activeCommentatorIds.isEmpty() || it.targetBookId in activeCommentatorIds }
             .map {
@@ -1733,6 +1742,75 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             }
         forward + inverse
     }
+
+    suspend fun getSourceSummariesForLines(lineIds: List<Long>): List<CommentarySummary> =
+        withContext(Dispatchers.IO) {
+            if (lineIds.isEmpty()) return@withContext emptyList()
+            queryAllLinkPartitionsForTargetLines(lineIds) {
+                database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(
+                    lineIds,
+                    sourceConnectionTypeNames,
+                ).executeAsList()
+            }.map {
+                CommentarySummary(
+                    link = Link(
+                        id = it.id,
+                        sourceBookId = it.sourceBookId,
+                        targetBookId = it.targetBookId,
+                        sourceLineId = it.sourceLineId,
+                        targetLineId = it.targetLineId,
+                        targetLineIndex = it.targetLineIndex.toInt(),
+                        connectionType = ConnectionType.SOURCE,
+                    ),
+                    targetBookTitle = it.targetBookTitle,
+                )
+            }
+        }
+
+    suspend fun getMentionSummariesForLines(lineIds: List<Long>): List<CommentarySummary> =
+        withContext(Dispatchers.IO) {
+            if (lineIds.isEmpty()) return@withContext emptyList()
+            val forward = database.linkQueriesQueries.selectLinkSummariesBySourceLineIdsAndTypes(
+                lineIds,
+                mentionConnectionTypeNames,
+            ).executeAsList()
+                .map {
+                    CommentarySummary(
+                        link = Link(
+                            id = it.id,
+                            sourceBookId = it.sourceBookId,
+                            targetBookId = it.targetBookId,
+                            sourceLineId = it.sourceLineId,
+                            targetLineId = it.targetLineId,
+                            targetLineIndex = it.targetLineIndex.toInt(),
+                            connectionType = ConnectionType.MENTION,
+                        ),
+                        targetBookTitle = it.targetBookTitle,
+                    )
+                }
+            val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
+                database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(
+                    lineIds,
+                    mentionConnectionTypeNames,
+                ).executeAsList()
+            }.map {
+                CommentarySummary(
+                    link = Link(
+                        id = it.id,
+                        sourceBookId = it.sourceBookId,
+                        targetBookId = it.targetBookId,
+                        sourceLineId = it.sourceLineId,
+                        targetLineId = it.targetLineId,
+                        targetLineIndex = it.targetLineIndex.toInt(),
+                        connectionType = ConnectionType.MENTION,
+                    ),
+                    targetBookTitle = it.targetBookTitle,
+                )
+            }
+            (forward + inverse).distinctBy {
+                listOf(it.link.sourceLineId, it.link.targetLineId, it.link.targetBookId)
+            }
+        }
 
     suspend fun getAvailableCommentators(bookId: Long): List<CommentatorInfo> =
         withContext(Dispatchers.IO) {
@@ -1783,16 +1861,43 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         // SOURCE is a virtual type: route to mirror queries that read inverse
         // direction (where targetLineId IN lineIds). Mixing SOURCE with other
         // types is unsupported — callers should query them separately.
+        if (connectionTypes == setOf(ConnectionType.MENTION)) {
+            val pageWindow = (offset + limit).coerceAtLeast(0)
+            val forward = getCommentariesForLineRange(
+                lineIds = lineIds,
+                activeCommentatorIds = activeCommentatorIds,
+                connectionTypes = setOf(ConnectionType.REFERENCE, ConnectionType.OTHER),
+                offset = 0,
+                limit = pageWindow,
+                distinctByTargetLine = distinctByTargetLine,
+            ).map { it.copy(link = it.link.copy(connectionType = ConnectionType.MENTION)) }
+            val inverse = getInverseLinksForLineRange(
+                lineIds = lineIds,
+                activeSourceBookIds = activeCommentatorIds,
+                offset = 0,
+                limit = pageWindow,
+                distinctBySourceLine = distinctByTargetLine,
+                virtualType = ConnectionType.MENTION,
+                storedTypeNames = mentionConnectionTypeNames,
+            )
+            return@withContext (forward + inverse)
+                .distinctBy { listOf(it.link.sourceLineId, it.link.targetLineId, it.link.targetBookId) }
+                .sortedWith(compareBy<CommentaryWithText> { it.targetBookTitle }.thenBy { it.link.targetLineIndex })
+                .drop(offset)
+                .take(limit)
+        }
         if (ConnectionType.SOURCE in connectionTypes) {
             require(connectionTypes.size == 1) {
                 "SOURCE cannot be mixed with other connection types in a single query"
             }
-            return@withContext getSourceLinksForLineRange(
+            return@withContext getInverseLinksForLineRange(
                 lineIds = lineIds,
                 activeSourceBookIds = activeCommentatorIds,
                 offset = offset,
                 limit = limit,
                 distinctBySourceLine = distinctByTargetLine,
+                virtualType = ConnectionType.SOURCE,
+                storedTypeNames = sourceConnectionTypeNames,
             )
         }
         val typeNames = connectionTypes.map { it.name }
@@ -1897,12 +2002,14 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
      * source/target columns swapped and `connectionType = SOURCE`. Mirrors
      * the pagination/ordering contract of [getCommentariesForLineRange].
      */
-    private fun getSourceLinksForLineRange(
+    private fun getInverseLinksForLineRange(
         lineIds: List<Long>,
         activeSourceBookIds: Set<Long>,
         offset: Int,
         limit: Int,
         distinctBySourceLine: Boolean,
+        virtualType: ConnectionType,
+        storedTypeNames: List<String>,
     ): List<CommentaryWithText> {
         val useDistinct = distinctBySourceLine && lineIds.size > 1
         if (driver is LinkPartitionQueryDriver) {
@@ -1916,6 +2023,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                         activeSourceBookIds.isEmpty() && useDistinct ->
                             database.linkQueriesQueries.selectInverseLinksByTargetLineIdsPagedDistinct(
                                 lineIds,
+                                storedTypeNames,
                                 pageWindow,
                                 0L,
                             ).executeAsList().map {
@@ -1927,7 +2035,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                                         sourceLineId = it.sourceLineId ?: 0L,
                                         targetLineId = it.targetLineId,
                                         targetLineIndex = (it.targetLineIndex ?: 0L).toInt(),
-                                        connectionType = ConnectionType.SOURCE,
+                                        connectionType = virtualType,
                                     ),
                                     targetBookTitle = it.targetBookTitle,
                                     targetText = it.targetText,
@@ -1937,6 +2045,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                         activeSourceBookIds.isEmpty() ->
                             database.linkQueriesQueries.selectInverseLinksByTargetLineIdsPaged(
                                 lineIds,
+                                storedTypeNames,
                                 pageWindow,
                                 0L,
                             ).executeAsList().map {
@@ -1948,7 +2057,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                                         sourceLineId = it.sourceLineId,
                                         targetLineId = it.targetLineId,
                                         targetLineIndex = it.targetLineIndex.toInt(),
-                                        connectionType = ConnectionType.SOURCE,
+                                        connectionType = virtualType,
                                     ),
                                     targetBookTitle = it.targetBookTitle,
                                     targetText = it.targetText,
@@ -1959,6 +2068,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                             database.linkQueriesQueries.selectInverseLinksByTargetLineIdsAndSourcesPagedDistinct(
                                 lineIds,
                                 activeSourceBookIds.toList(),
+                                storedTypeNames,
                                 pageWindow,
                                 0L,
                             ).executeAsList().map {
@@ -1970,7 +2080,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                                         sourceLineId = it.sourceLineId ?: 0L,
                                         targetLineId = it.targetLineId,
                                         targetLineIndex = (it.targetLineIndex ?: 0L).toInt(),
-                                        connectionType = ConnectionType.SOURCE,
+                                        connectionType = virtualType,
                                     ),
                                     targetBookTitle = it.targetBookTitle,
                                     targetText = it.targetText,
@@ -1981,6 +2091,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                             database.linkQueriesQueries.selectInverseLinksByTargetLineIdsAndSourcesPaged(
                                 lineIds,
                                 activeSourceBookIds.toList(),
+                                storedTypeNames,
                                 pageWindow,
                                 0L,
                             ).executeAsList().map {
@@ -1992,7 +2103,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                                         sourceLineId = it.sourceLineId,
                                         targetLineId = it.targetLineId,
                                         targetLineIndex = it.targetLineIndex.toInt(),
-                                        connectionType = ConnectionType.SOURCE,
+                                        connectionType = virtualType,
                                     ),
                                     targetBookTitle = it.targetBookTitle,
                                     targetText = it.targetText,
@@ -2006,6 +2117,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             if (useDistinct) {
                 database.linkQueriesQueries.selectInverseLinksByTargetLineIdsPagedDistinct(
                     lineIds,
+                    storedTypeNames,
                     limit.toLong(),
                     offset.toLong(),
                 ).executeAsList().map {
@@ -2017,7 +2129,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                             sourceLineId = it.sourceLineId ?: 0L,
                             targetLineId = it.targetLineId,
                             targetLineIndex = (it.targetLineIndex ?: 0L).toInt(),
-                            connectionType = ConnectionType.SOURCE,
+                            connectionType = virtualType,
                         ),
                         targetBookTitle = it.targetBookTitle,
                         targetText = it.targetText,
@@ -2026,6 +2138,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             } else {
                 database.linkQueriesQueries.selectInverseLinksByTargetLineIdsPaged(
                     lineIds,
+                    storedTypeNames,
                     limit.toLong(),
                     offset.toLong(),
                 ).executeAsList().map {
@@ -2037,7 +2150,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                             sourceLineId = it.sourceLineId,
                             targetLineId = it.targetLineId,
                             targetLineIndex = it.targetLineIndex.toInt(),
-                            connectionType = ConnectionType.SOURCE,
+                            connectionType = virtualType,
                         ),
                         targetBookTitle = it.targetBookTitle,
                         targetText = it.targetText,
@@ -2049,6 +2162,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 database.linkQueriesQueries.selectInverseLinksByTargetLineIdsAndSourcesPagedDistinct(
                     lineIds,
                     activeSourceBookIds.toList(),
+                    storedTypeNames,
                     limit.toLong(),
                     offset.toLong(),
                 ).executeAsList().map {
@@ -2060,7 +2174,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                             sourceLineId = it.sourceLineId ?: 0L,
                             targetLineId = it.targetLineId,
                             targetLineIndex = (it.targetLineIndex ?: 0L).toInt(),
-                            connectionType = ConnectionType.SOURCE,
+                            connectionType = virtualType,
                         ),
                         targetBookTitle = it.targetBookTitle,
                         targetText = it.targetText,
@@ -2070,6 +2184,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 database.linkQueriesQueries.selectInverseLinksByTargetLineIdsAndSourcesPaged(
                     lineIds,
                     activeSourceBookIds.toList(),
+                    storedTypeNames,
                     limit.toLong(),
                     offset.toLong(),
                 ).executeAsList().map {
@@ -2081,7 +2196,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                             sourceLineId = it.sourceLineId,
                             targetLineId = it.targetLineId,
                             targetLineIndex = it.targetLineIndex.toInt(),
-                            connectionType = ConnectionType.SOURCE,
+                            connectionType = virtualType,
                         ),
                         targetBookTitle = it.targetBookTitle,
                         targetText = it.targetText,
@@ -2106,24 +2221,48 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         connectionTypes: Set<ConnectionType> = setOf(ConnectionType.COMMENTARY),
     ): List<Int> = withContext(Dispatchers.IO) {
         if (lineIds.isEmpty() || connectionTypes.isEmpty()) return@withContext emptyList()
+        if (connectionTypes == setOf(ConnectionType.MENTION)) {
+            val forward = getCommentaryCharCountsForLines(
+                lineIds,
+                activeCommentatorIds,
+                setOf(ConnectionType.REFERENCE, ConnectionType.OTHER),
+            )
+            val inverse = if (activeCommentatorIds.isEmpty()) {
+                queryAllLinkPartitionsForTargetLines(lineIds) {
+                    database.linkQueriesQueries.selectInverseLinkCharCountsByTargetLineIds(
+                        lineIds,
+                        mentionConnectionTypeNames,
+                    ).executeAsList()
+                }
+            } else {
+                queryAllLinkPartitionsForTargetLines(lineIds) {
+                    database.linkQueriesQueries.selectInverseLinkCharCountsByTargetLineIdsAndSources(
+                        lineIds,
+                        activeCommentatorIds.toList(),
+                        mentionConnectionTypeNames,
+                    ).executeAsList()
+                }
+            }
+            return@withContext forward + inverse.map { it.toInt() }
+        }
         if (ConnectionType.SOURCE in connectionTypes) {
             require(connectionTypes.size == 1) {
                 "SOURCE cannot be mixed with other connection types in a single query"
             }
             val rows = if (activeCommentatorIds.isEmpty()) {
                 queryAllLinkPartitionsForTargetLines(lineIds) {
-                    database.linkQueriesQueries
-                        .selectInverseLinkCharCountsByTargetLineIds(lineIds)
-                        .executeAsList()
+                    database.linkQueriesQueries.selectInverseLinkCharCountsByTargetLineIds(
+                        lineIds,
+                        sourceConnectionTypeNames,
+                    ).executeAsList()
                 }
             } else {
                 queryAllLinkPartitionsForTargetLines(lineIds) {
-                    database.linkQueriesQueries
-                        .selectInverseLinkCharCountsByTargetLineIdsAndSources(
-                            lineIds,
-                            activeCommentatorIds.toList(),
-                        )
-                        .executeAsList()
+                    database.linkQueriesQueries.selectInverseLinkCharCountsByTargetLineIdsAndSources(
+                        lineIds,
+                        activeCommentatorIds.toList(),
+                        sourceConnectionTypeNames,
+                    ).executeAsList()
                 }
             }
             return@withContext rows.map { it.toInt() }

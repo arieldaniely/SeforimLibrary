@@ -24,4 +24,9 @@ interface LinkPartitionQueryDriver {
 
     /** True when an attached partition contains links targeting [bookId]. */
     fun hasAdditionalLinksTargetingBook(bookId: Long): Boolean = false
+
+    fun hasAdditionalSourceLinksTargetingBook(bookId: Long): Boolean =
+        hasAdditionalLinksTargetingBook(bookId)
+
+    fun hasAdditionalMentionLinksForBook(bookId: Long): Boolean = false
 }
