@@ -1746,7 +1746,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     suspend fun getSourceSummariesForLines(lineIds: List<Long>): List<CommentarySummary> =
         withContext(Dispatchers.IO) {
             if (lineIds.isEmpty()) return@withContext emptyList()
-            queryAllLinkPartitionsForTargetLines(lineIds) {
+            val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
                 database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(
                     lineIds,
                     sourceConnectionTypeNames,
@@ -1765,30 +1765,30 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     targetBookTitle = it.targetBookTitle,
                 )
             }
+            val cited = database.linkQueriesQueries.selectLinkSummariesBySourceLineIdsAndTypes(
+                lineIds,
+                mentionConnectionTypeNames,
+            ).executeAsList().map {
+                CommentarySummary(
+                    link = Link(
+                        id = it.id,
+                        sourceBookId = it.sourceBookId,
+                        targetBookId = it.targetBookId,
+                        sourceLineId = it.sourceLineId,
+                        targetLineId = it.targetLineId,
+                        targetLineIndex = it.targetLineIndex.toInt(),
+                        connectionType = ConnectionType.SOURCE,
+                    ),
+                    targetBookTitle = it.targetBookTitle,
+                )
+            }
+            (inverse + cited).distinctBy { it.link.sourceLineId to it.link.targetLineId }
         }
 
     suspend fun getMentionSummariesForLines(lineIds: List<Long>): List<CommentarySummary> =
         withContext(Dispatchers.IO) {
             if (lineIds.isEmpty()) return@withContext emptyList()
-            val forward = database.linkQueriesQueries.selectLinkSummariesBySourceLineIdsAndTypes(
-                lineIds,
-                mentionConnectionTypeNames,
-            ).executeAsList()
-                .map {
-                    CommentarySummary(
-                        link = Link(
-                            id = it.id,
-                            sourceBookId = it.sourceBookId,
-                            targetBookId = it.targetBookId,
-                            sourceLineId = it.sourceLineId,
-                            targetLineId = it.targetLineId,
-                            targetLineIndex = it.targetLineIndex.toInt(),
-                            connectionType = ConnectionType.MENTION,
-                        ),
-                        targetBookTitle = it.targetBookTitle,
-                    )
-                }
-            val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
+            queryAllLinkPartitionsForTargetLines(lineIds) {
                 database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(
                     lineIds,
                     mentionConnectionTypeNames,
@@ -1807,11 +1807,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     targetBookTitle = it.targetBookTitle,
                 )
             }
-            (forward + inverse).distinctBy {
-                listOf(it.link.sourceLineId, it.link.targetLineId, it.link.targetBookId)
-            }
         }
-
     suspend fun getAvailableCommentators(bookId: Long): List<CommentatorInfo> =
         withContext(Dispatchers.IO) {
             database.linkQueriesQueries.selectCommentatorsByBook(bookId).executeAsList()
@@ -1862,43 +1858,32 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         // direction (where targetLineId IN lineIds). Mixing SOURCE with other
         // types is unsupported — callers should query them separately.
         if (connectionTypes == setOf(ConnectionType.MENTION)) {
-            val pageWindow = (offset + limit).coerceAtLeast(0)
-            val forward = getCommentariesForLineRange(
-                lineIds = lineIds,
-                activeCommentatorIds = activeCommentatorIds,
-                connectionTypes = setOf(ConnectionType.REFERENCE, ConnectionType.OTHER),
-                offset = 0,
-                limit = pageWindow,
-                distinctByTargetLine = distinctByTargetLine,
-            ).map { it.copy(link = it.link.copy(connectionType = ConnectionType.MENTION)) }
-            val inverse = getInverseLinksForLineRange(
-                lineIds = lineIds,
-                activeSourceBookIds = activeCommentatorIds,
-                offset = 0,
-                limit = pageWindow,
-                distinctBySourceLine = distinctByTargetLine,
-                virtualType = ConnectionType.MENTION,
-                storedTypeNames = mentionConnectionTypeNames,
-            )
-            return@withContext (forward + inverse)
-                .distinctBy { listOf(it.link.sourceLineId, it.link.targetLineId, it.link.targetBookId) }
-                .sortedWith(compareBy<CommentaryWithText> { it.targetBookTitle }.thenBy { it.link.targetLineIndex })
-                .drop(offset)
-                .take(limit)
-        }
-        if (ConnectionType.SOURCE in connectionTypes) {
-            require(connectionTypes.size == 1) {
-                "SOURCE cannot be mixed with other connection types in a single query"
-            }
             return@withContext getInverseLinksForLineRange(
                 lineIds = lineIds,
                 activeSourceBookIds = activeCommentatorIds,
                 offset = offset,
                 limit = limit,
                 distinctBySourceLine = distinctByTargetLine,
-                virtualType = ConnectionType.SOURCE,
-                storedTypeNames = sourceConnectionTypeNames,
+                virtualType = ConnectionType.MENTION,
+                storedTypeNames = mentionConnectionTypeNames,
             )
+        }
+        if (ConnectionType.SOURCE in connectionTypes) {
+            require(connectionTypes.size == 1) {
+                "SOURCE cannot be mixed with other connection types in a single query"
+            }
+            val pageWindow = (offset + limit).coerceAtLeast(0)
+            val inverse = getInverseLinksForLineRange(
+                lineIds, activeCommentatorIds, 0, pageWindow, distinctByTargetLine,
+                ConnectionType.SOURCE, sourceConnectionTypeNames,
+            )
+            val cited = getCommentariesForLineRange(
+                lineIds, activeCommentatorIds, setOf(ConnectionType.REFERENCE, ConnectionType.OTHER),
+                0, pageWindow, distinctByTargetLine,
+            ).map { it.copy(link = it.link.copy(connectionType = ConnectionType.SOURCE)) }
+            return@withContext (inverse + cited)
+                .distinctBy { it.link.sourceLineId to it.link.targetLineId }
+                .drop(offset).take(limit)
         }
         val typeNames = connectionTypes.map { it.name }
         // Use distinct queries when dealing with multiple source lines to avoid duplicate target lines
@@ -2222,11 +2207,6 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     ): List<Int> = withContext(Dispatchers.IO) {
         if (lineIds.isEmpty() || connectionTypes.isEmpty()) return@withContext emptyList()
         if (connectionTypes == setOf(ConnectionType.MENTION)) {
-            val forward = getCommentaryCharCountsForLines(
-                lineIds,
-                activeCommentatorIds,
-                setOf(ConnectionType.REFERENCE, ConnectionType.OTHER),
-            )
             val inverse = if (activeCommentatorIds.isEmpty()) {
                 queryAllLinkPartitionsForTargetLines(lineIds) {
                     database.linkQueriesQueries.selectInverseLinkCharCountsByTargetLineIds(
@@ -2243,7 +2223,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     ).executeAsList()
                 }
             }
-            return@withContext forward + inverse.map { it.toInt() }
+            return@withContext inverse.map { it.toInt() }
         }
         if (ConnectionType.SOURCE in connectionTypes) {
             require(connectionTypes.size == 1) {
@@ -2265,7 +2245,10 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     ).executeAsList()
                 }
             }
-            return@withContext rows.map { it.toInt() }
+            val cited = getCommentaryCharCountsForLines(
+                lineIds, activeCommentatorIds, setOf(ConnectionType.REFERENCE, ConnectionType.OTHER),
+            )
+            return@withContext rows.map { it.toInt() } + cited
         }
         val typeNames = connectionTypes.map { it.name }
         val rows = if (activeCommentatorIds.isEmpty()) {

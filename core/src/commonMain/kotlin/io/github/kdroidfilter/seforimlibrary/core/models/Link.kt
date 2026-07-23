@@ -60,10 +60,10 @@ enum class ConnectionType {
     TARGUM,
     REFERENCE,
 
-    /** Virtual: never stored. Derived by the repository from reverse-direction links. */
+    /** Virtual: never stored. Bases and forward REFERENCE/OTHER citations used by this text. */
     SOURCE,
 
-    /** Virtual: never stored. REFERENCE/OTHER links touching this text, in either stored direction. */
+    /** Virtual: never stored. Inbound REFERENCE/OTHER links where another text mentions this one. */
     MENTION,
 
     MIDRASH,
