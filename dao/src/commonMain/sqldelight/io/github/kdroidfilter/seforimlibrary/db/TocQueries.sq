@@ -4,7 +4,9 @@ selectByBookId:
 SELECT t.*, tt.text
 FROM tocEntry t
 JOIN tocText tt ON t.textId = tt.id
-WHERE t.bookId = ?;
+LEFT JOIN line l ON t.lineId = l.id
+WHERE t.bookId = ?
+ORDER BY l.lineIndex ASC, t.id ASC;
 
 selectTocById:
 SELECT t.*, tt.text
@@ -16,13 +18,17 @@ selectRootByBookId:
 SELECT t.*, tt.text
 FROM tocEntry t
 JOIN tocText tt ON t.textId = tt.id
-WHERE t.bookId = ? AND t.parentId IS NULL;
+LEFT JOIN line l ON t.lineId = l.id
+WHERE t.bookId = ? AND t.parentId IS NULL
+ORDER BY l.lineIndex ASC, t.id ASC;
 
 selectChildren:
 SELECT t.*, tt.text
 FROM tocEntry t
 JOIN tocText tt ON t.textId = tt.id
-WHERE t.parentId = ?;
+LEFT JOIN line l ON t.lineId = l.id
+WHERE t.parentId = ?
+ORDER BY l.lineIndex ASC, t.id ASC;
 
 selectByLineId:
 SELECT t.*, tt.text
@@ -74,8 +80,8 @@ selectFirstLeafUnder:
 WITH RECURSIVE descent(id, hasChildren) AS (
     SELECT id, hasChildren FROM tocEntry WHERE id = ?
     UNION ALL
-    SELECT (SELECT t.id FROM tocEntry t WHERE t.parentId = d.id ORDER BY t.id LIMIT 1),
-           (SELECT t.hasChildren FROM tocEntry t WHERE t.parentId = d.id ORDER BY t.id LIMIT 1)
+    SELECT (SELECT t.id FROM tocEntry t LEFT JOIN line l ON t.lineId = l.id WHERE t.parentId = d.id ORDER BY l.lineIndex ASC, t.id ASC LIMIT 1),
+           (SELECT t.hasChildren FROM tocEntry t LEFT JOIN line l ON t.lineId = l.id WHERE t.parentId = d.id ORDER BY l.lineIndex ASC, t.id ASC LIMIT 1)
     FROM descent d
     WHERE d.hasChildren = 1
 )
