@@ -552,6 +552,8 @@ private val ORIENTED_DEPENDANT_TYPES = setOf(
     ConnectionType.MIDRASH,
     ConnectionType.PARSHANUT,
     ConnectionType.DIBUR_HAMATCHIL,
+    ConnectionType.ELUCIDATION,
+    ConnectionType.EXPLICATION,
     // Ein Mishpat / Ner Mitzvah is the standard halakhic-index layer on the
     // Talmud folio that anchors each sugya to the matching halakhah in
     // Mishneh Torah / Tur / Shulchan Arukh / Sefer Mitzvot Gadol. Sefaria
