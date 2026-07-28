@@ -24,7 +24,11 @@ import java.sql.DriverManager
 
 /** Builds the small, replaceable index that belongs to a personal-library generation. */
 object PersonalLuceneIndexBuilder {
-    fun build(database: Path, target: Path) {
+    fun build(
+        database: Path,
+        target: Path,
+        onProgress: ((current: Long, total: Long) -> Unit)? = null,
+    ) {
         Files.createDirectories(target)
         val ngramAnalyzer = object : Analyzer() {
             override fun createComponents(fieldName: String): TokenStreamComponents {
@@ -38,6 +42,19 @@ object PersonalLuceneIndexBuilder {
         FSDirectory.open(target).use { directory ->
             IndexWriter(directory, IndexWriterConfig(analyzer).apply { openMode = IndexWriterConfig.OpenMode.CREATE }).use { writer ->
                 DriverManager.getConnection("jdbc:sqlite:$database").use { connection ->
+                    val totalDocuments =
+                        connection.createStatement().use { statement ->
+                            statement.executeQuery(
+                                "SELECT (SELECT COUNT(*) FROM line) + (SELECT COUNT(*) FROM book) + " +
+                                    "(SELECT COUNT(*) FROM book_acronym)",
+                            ).use { rows -> rows.getLong(1).coerceAtLeast(1L) }
+                        }
+                    var completedDocuments = 0L
+                    fun documentAdded() {
+                        completedDocuments++
+                        onProgress?.invoke(completedDocuments, totalDocuments)
+                    }
+                    onProgress?.invoke(0L, totalDocuments)
                     val ancestors = HashMap<Long, List<Long>>()
                     connection.prepareStatement(
                         "SELECT ancestorId FROM category_closure WHERE descendantId=? ORDER BY ancestorId",
@@ -53,10 +70,14 @@ object PersonalLuceneIndexBuilder {
                                     val order = rows.getInt(4)
                                     val baseBook = rows.getInt(5) != 0
                                     addTitle(writer, bookId, categoryId, title, title)
+                                    documentAdded()
                                     connection.prepareStatement("SELECT term FROM book_acronym WHERE bookId=?").use { aliases ->
                                         aliases.setLong(1, bookId)
                                         aliases.executeQuery().use { aliasRows ->
-                                            while (aliasRows.next()) addTitle(writer, bookId, categoryId, title, aliasRows.getString(1))
+                                            while (aliasRows.next()) {
+                                                addTitle(writer, bookId, categoryId, title, aliasRows.getString(1))
+                                                documentAdded()
+                                            }
                                         }
                                     }
                                     val categoryAncestors = ancestors.getOrPut(categoryId) {
@@ -83,6 +104,7 @@ object PersonalLuceneIndexBuilder {
                                                     lineIndex = lineRows.getInt(2),
                                                     content = lineRows.getString(3),
                                                 )
+                                                documentAdded()
                                             }
                                         }
                                     }
