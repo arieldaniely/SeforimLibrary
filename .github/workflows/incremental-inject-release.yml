@@ -2,9 +2,9 @@ name: Incremental Inject + Release
 
 # Resource-bounded release path:
 #   1. restore the latest published DB bundle,
-#   2. append only currently-allowed Sefaria books missing from that DB,
-#   3. run the existing Otzaria append phases,
-#   4. append the new books to the bundled Lucene indexes and publish.
+#   2. export currently-allowed, missing Sefaria books as an Otzaria ZIP,
+#   3. append those books to the DB and run the existing Otzaria phases,
+#   4. append the new books to Lucene and publish both DB and ZIP artifacts.
 
 on:
   workflow_dispatch:
@@ -72,7 +72,7 @@ jobs:
       - name: Install database workflow tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends jq sqlite3 zstd
+          sudo apt-get install -y --no-install-recommends jq sqlite3 unzip zstd
           chmod +x gradlew
 
       - name: Resolve seed and new release versions
@@ -124,9 +124,24 @@ jobs:
           BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
           LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
           sqlite3 build/seforim.db 'SELECT id FROM book ORDER BY id;' > seed-book-ids.txt
+          sqlite3 -json build/seforim.db \
+            'SELECT s.name AS source, COUNT(*) AS books FROM book b JOIN source s ON s.id=b.sourceId GROUP BY s.id, s.name ORDER BY s.name;' \
+            > seed-source-counts.json
           echo "books=$BOOKS" >> "$GITHUB_OUTPUT"
           echo "lines=$LINES" >> "$GITHUB_OUTPUT"
           echo "Seed counts: books=$BOOKS lines=$LINES"
+
+      - name: Export missing Sefaria books as an Otzaria ZIP
+        run: |
+          ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
+            -PseedDb="$PWD/build/seforim.db" \
+            -PotzariaOutputDir="$PWD/build/incremental-sefaria-otzaria" \
+            -PotzariaOutputZip="$PWD/build/incremental-sefaria-otzaria.zip" \
+            -PincrementalReport="$PWD/build/incremental-sefaria-report.json" \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+          test -s build/incremental-sefaria-otzaria.zip
+          unzip -t build/incremental-sefaria-otzaria.zip
 
       - name: Inject missing Sefaria books
         run: |
@@ -198,8 +213,8 @@ jobs:
           ./gradlew :packaging:packageArtifacts \
             -PseforimDb="$PWD/build/seforim.db" \
             -PbundleOutput="$PWD/build/package/seforim_bundle.tar.zst" \
-            -PzstdLevel=10 \
             -PzstdWorkers=1 \
+            -PsplitPartBytes=2147483647 \
             --no-daemon --stacktrace
 
       - name: Stage and validate release assets
@@ -209,6 +224,8 @@ jobs:
           cp build/package/seforim_bundle.tar.zst.part* release-staging/
           cp build/seforim.db.buildstate release-staging/
           cp build/catalog.pb release-staging/
+          cp build/incremental-sefaria-otzaria.zip \
+            "release-staging/sefaria-otzaria-${{ steps.versions.outputs.release_tag }}.zip"
           test -n "$(find release-staging -maxdepth 1 -type f -print -quit)"
           OVER=$(find release-staging -maxdepth 1 -type f -size +2147483647c -print)
           test -z "$OVER" || { echo "::error::Release assets exceed GitHub's 2 GiB limit: $OVER"; exit 1; }
@@ -246,3 +263,15 @@ jobs:
             git pull --rebase origin master
             git push origin HEAD:master
           fi
+
+      - name: Write injection summary
+        if: ${{ always() }}
+        shell: bash
+        env:
+          SEED_BOOKS: ${{ steps.seed_counts.outputs.books }}
+          SEED_LINES: ${{ steps.seed_counts.outputs.lines }}
+        run: |
+          bash .github/scripts/write-incremental-summary.sh \
+            build/seforim.db \
+            seed-source-counts.json \
+            build/incremental-sefaria-report.json

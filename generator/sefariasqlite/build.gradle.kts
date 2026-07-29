@@ -115,6 +115,44 @@ tasks.register<JavaExec>("appendMissingSefaria") {
     )
 }
 
+// Export the same currently-allowed, seed-missing Sefaria books without
+// constructing or modifying a database. The result is an Otzaria-compatible ZIP.
+// Usage:
+//   ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
+//     -PseedDb=/path/to/seforim.db -PotzariaOutputZip=/path/to/books.zip
+tasks.register<JavaExec>("exportIncrementalSefariaOtzaria") {
+    group = "application"
+    description = "Export currently-allowed Sefaria books missing from a seed DB as an Otzaria ZIP."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.ExportIncrementalSefariaOtzariaKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    val seedDb = (project.findProperty("seedDb") as String?)
+        ?: System.getenv("SEED_DB")
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    val outputDir = (project.findProperty("otzariaOutputDir") as String?)
+        ?: rootProject.layout.buildDirectory.dir("incremental-sefaria-otzaria").get().asFile.absolutePath
+    val outputZip = (project.findProperty("otzariaOutputZip") as String?)
+        ?: rootProject.layout.buildDirectory.file("incremental-sefaria-otzaria.zip").get().asFile.absolutePath
+
+    systemProperty("seedDb", seedDb)
+    systemProperty("outputDir", outputDir)
+    systemProperty("outputZip", outputZip)
+    val reportPath = (project.findProperty("incrementalReport") as String?)
+        ?: rootProject.layout.buildDirectory.file("incremental-sefaria-report.json").get().asFile.absolutePath
+    systemProperty("reportPath", reportPath)
+    if (project.hasProperty("exportDir")) {
+        systemProperty("exportDir", project.property("exportDir") as String)
+    }
+
+    jvmArgs = listOf(
+        "-Xmx$generatorHeap",
+        "-XX:+UseG1GC",
+        "-XX:MaxGCPauseMillis=200"
+    )
+}
+
 // Post-processing step to rename categories after all generation is complete
 // Usage:
 //   ./gradlew :sefariasqlite:renameCategories
