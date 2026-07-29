@@ -54,6 +54,10 @@ fun main() = runBlocking {
             ?: System.getenv("SEFARIA_INCREMENTAL_REPORT")
             ?: Paths.get("build", "incremental-sefaria-report.json").toString()
     ).toAbsolutePath().normalize()
+    val mergedFilesList = System.getProperty("mergedFilesList")?.let(Paths::get)?.toAbsolutePath()?.normalize()
+    val ignoreBlacklists = System.getProperty("ignoreBlacklists").toBoolean()
+    val apiLinksPath = System.getProperty("apiLinksPath")?.let(Paths::get)?.toAbsolutePath()?.normalize()
+    val reportSource = System.getProperty("reportSource") ?: "Sefaria bulk export"
     require(!outputZip.startsWith(outputDir)) {
         "outputZip must be outside outputDir so it is not included in itself"
     }
@@ -80,13 +84,26 @@ fun main() = runBlocking {
         schemaLookup = schemaLookup,
         excludedTitleKeys = existingTitleKeys,
     )
-    val mergedFiles = selection.files
+    val mergedFiles = if (mergedFilesList != null) {
+        require(Files.isRegularFile(mergedFilesList)) { "Merged-files manifest not found at $mergedFilesList" }
+        Files.readAllLines(mergedFilesList, StandardCharsets.UTF_8)
+            .asSequence()
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .map { Paths.get(it) }
+            .map { it.toAbsolutePath().normalize() }
+            .onEach { require(Files.isRegularFile(it)) { "Merged JSON not found at $it" } }
+            .toList()
+    } else {
+        selection.files
+    }
 
     SefariaImageEmbedder.prefetch(mergedFiles, logger = logger)
     val candidates = reader.readBooksInParallel(mergedFiles, schemaDir, schemaLookup)
     val filtered = filterBlacklistedPayloads(
         payloads = candidates,
-        blacklists = loadSefariaBlacklists(SefariaOtzariaExporter::class.java.classLoader, logger),
+        blacklists = if (ignoreBlacklists) SefariaBlacklists.Empty else
+            loadSefariaBlacklists(SefariaOtzariaExporter::class.java.classLoader, logger),
     )
     if (filtered.skippedTotal > 0) {
         logger.i {
@@ -102,9 +119,11 @@ fun main() = runBlocking {
         linksDir = dbRoot.resolve("links"),
         outputRoot = outputDir,
         outputZip = outputZip,
+        apiLinksPath = apiLinksPath,
+        seedDb = seedDb,
     )
     val report = IncrementalSefariaExportReport(
-        source = "Sefaria bulk export",
+        source = reportSource,
         schemasInSource = selection.schemaCount,
         schemasWithoutMerged = selection.schemasWithoutMergedCount,
         schemasWithoutMergedExamples = selection.schemasWithoutMergedExamples,
@@ -119,6 +138,7 @@ fun main() = runBlocking {
         skippedByAuthorBlacklist = filtered.skippedByAuthor,
         exportedBooks = result.bookCount,
         exportedLinks = result.linkCount,
+        unresolvedExternalLinks = result.unresolvedExternalLinks,
         bookBlacklistExamples = filtered.skippedBookExamples,
         authorBlacklistExamples = filtered.skippedAuthorExamples,
     )
@@ -147,6 +167,7 @@ internal data class IncrementalSefariaExportReport(
     val skippedByAuthorBlacklist: Int,
     val exportedBooks: Int,
     val exportedLinks: Int,
+    val unresolvedExternalLinks: Int,
     val bookBlacklistExamples: List<String>,
     val authorBlacklistExamples: List<String>,
 )
@@ -160,6 +181,8 @@ internal class SefariaOtzariaExporter(
         linksDir: Path,
         outputRoot: Path,
         outputZip: Path,
+        apiLinksPath: Path? = null,
+        seedDb: Path? = null,
     ): OtzariaExportResult {
         recreateDirectory(outputRoot)
         Files.createDirectories(outputZip.parent)
@@ -188,13 +211,19 @@ internal class SefariaOtzariaExporter(
 
         outputRoot.resolve("files_manifest.json").writeText(json.encodeToString(manifest))
         outputRoot.resolve("metadata.json").writeText(json.encodeToString(metadata))
-        val linkCount = writeLinks(linksDir, refs, outputRoot)
+        val bulkLinkCount = writeLinks(linksDir, refs, outputRoot)
+        val apiLinkResult = if (apiLinksPath != null && seedDb != null) {
+            appendCopyrightApiLinks(json, apiLinksPath, seedDb, refs, outputRoot, logger)
+        } else {
+            CopyrightApiLinkResult(0, 0)
+        }
         zipDirectory(outputRoot, outputZip)
 
         return OtzariaExportResult(
             zipPath = outputZip,
             bookCount = payloads.size,
-            linkCount = linkCount,
+            linkCount = bulkLinkCount + apiLinkResult.written,
+            unresolvedExternalLinks = apiLinkResult.unresolved,
         )
     }
 
@@ -320,6 +349,7 @@ internal data class OtzariaExportResult(
     val zipPath: Path,
     val bookCount: Int,
     val linkCount: Int,
+    val unresolvedExternalLinks: Int,
 )
 
 @Serializable
@@ -334,7 +364,7 @@ private data class OtzariaLink(
     @SerialName("Conection Type") val connectionType: String,
 )
 
-private fun sanitizeOtzariaFileName(name: String): String = name
+internal fun sanitizeOtzariaFileName(name: String): String = name
     .replace("\"", "")
     .replace("'", "")
     .replace("״", "")

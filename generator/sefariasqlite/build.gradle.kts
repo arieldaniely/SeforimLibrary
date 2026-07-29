@@ -145,6 +145,14 @@ tasks.register<JavaExec>("exportIncrementalSefariaOtzaria") {
     if (project.hasProperty("exportDir")) {
         systemProperty("exportDir", project.property("exportDir") as String)
     }
+    listOf("mergedFilesList", "apiLinksPath", "reportSource").forEach { propertyName ->
+        if (project.hasProperty(propertyName)) {
+            systemProperty(propertyName, project.property(propertyName) as String)
+        }
+    }
+    if (project.hasProperty("ignoreBlacklists")) {
+        systemProperty("ignoreBlacklists", project.property("ignoreBlacklists") as String)
+    }
 
     jvmArgs = listOf(
         "-Xmx$generatorHeap",

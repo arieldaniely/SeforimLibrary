@@ -6,6 +6,7 @@ SEED_SOURCES_PATH="${2:-seed-source-counts.json}"
 SEFARIA_REPORT_PATH="${3:-build/incremental-sefaria-report.json}"
 FINAL_SOURCES_PATH="${RUNNER_TEMP:-build}/final-source-counts.json"
 COPYRIGHT_REPORT_PATH="${4:-build/copyright-only-titles.json}"
+COPYRIGHT_STATUS_PATH="${5:-build/copyright-report-status.json}"
 if [[ ! -s "$COPYRIGHT_REPORT_PATH" && -d build/sefaria/export ]]; then
   discovered_copyright_report=$(find build/sefaria/export -name copyright-only-titles.json -type f -print -quit 2>/dev/null || true)
   [[ -z "$discovered_copyright_report" ]] || COPYRIGHT_REPORT_PATH="$discovered_copyright_report"
@@ -72,11 +73,17 @@ fi
   echo
   if [[ -s "$COPYRIGHT_REPORT_PATH" ]]; then
     copyright_count=$(jq 'length' "$COPYRIGHT_REPORT_PATH")
+    if [[ -s "$COPYRIGHT_STATUS_PATH" ]]; then
+      checked_count=$(jq '.hebrewTitlesChecked' "$COPYRIGHT_STATUS_PATH")
+      error_count=$(jq '.requestErrors' "$COPYRIGHT_STATUS_PATH")
+      echo "נבדקו **$checked_count** כותרים בעלי גרסה עברית מול Versions API; שגיאות בקשה: **$error_count**."
+      echo
+    fi
     echo "נמצאו **$copyright_count** כותרים שכל הגרסאות העבריות שלהם סומנו Copyright והוסרו מה־bulk export."
     echo
     echo "<details><summary>הצגת רשימת הספרים</summary>"
     echo
-    jq -r '.[] | "- " + (._id // .title) + (if .versions then " — " + ([.versions[].license] | unique | join(", ")) else "" end)' "$COPYRIGHT_REPORT_PATH"
+    jq -r '.[] | "- " + .heTitle + (if .versions then " — " + ([.versions[].license] | unique | join(", ")) else "" end)' "$COPYRIGHT_REPORT_PATH"
     echo
     echo "</details>"
   else

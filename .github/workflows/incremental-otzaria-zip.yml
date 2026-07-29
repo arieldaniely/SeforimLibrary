@@ -22,6 +22,11 @@ on:
         required: false
         default: 30
         type: number
+      include_copyright_books:
+        description: Also build a separate Otzaria ZIP from Hebrew Copyright versions via the Sefaria API
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -34,7 +39,7 @@ jobs:
   export:
     name: Compare seed and export Otzaria ZIP
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SEED_REPOSITORY: ${{ inputs.source_repository }}
@@ -69,7 +74,7 @@ jobs:
       - name: Install archive tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends unzip zstd
+          sudo apt-get install -y --no-install-recommends jq unzip zstd
           chmod +x gradlew
 
       - name: Resolve seed version
@@ -111,8 +116,92 @@ jobs:
             -PseedDb="$PWD/build/seed-seforim.db" \
             -PotzariaOutputDir="$PWD/build/incremental-sefaria-otzaria" \
             -PotzariaOutputZip="$PWD/build/incremental-sefaria-otzaria.zip" \
+            -PincrementalReport="$PWD/build/incremental-sefaria-report.json" \
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace
+
+      - name: Build Hebrew copyright exclusion report
+        run: |
+          python3 .github/scripts/build-sefaria-copyright-report.py \
+            --input build/incremental-sefaria-report.json \
+            --output build/copyright-only-titles.json \
+            --status build/copyright-report-status.json \
+            --workers 8
+
+      - name: Download Hebrew Copyright books and outbound links
+        if: ${{ inputs.include_copyright_books }}
+        run: |
+          python3 .github/scripts/download-sefaria-copyright-export.py \
+            --report build/copyright-only-titles.json \
+            --export-root build/sefaria/export \
+            --manifest build/copyright-merged-files.txt \
+            --links build/copyright-api-links.json \
+            --status build/copyright-download-status.json \
+            --workers 2
+
+      - name: Export Hebrew Copyright books as a separate Otzaria ZIP
+        if: ${{ inputs.include_copyright_books }}
+        run: |
+          ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
+            -PseedDb="$PWD/build/seed-seforim.db" \
+            -PexportDir="$PWD/build/sefaria/export" \
+            -PmergedFilesList="$PWD/build/copyright-merged-files.txt" \
+            -PapiLinksPath="$PWD/build/copyright-api-links.json" \
+            -PreportSource="Sefaria API Hebrew Copyright versions" \
+            -PotzariaOutputDir="$PWD/build/copyright-sefaria-otzaria" \
+            -PotzariaOutputZip="$PWD/build/copyright-sefaria-otzaria.zip" \
+            -PincrementalReport="$PWD/build/copyright-otzaria-report.json" \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+
+      - name: Validate Hebrew Copyright Otzaria ZIP
+        if: ${{ inputs.include_copyright_books }}
+        run: |
+          set -euo pipefail
+          ZIP=build/copyright-sefaria-otzaria.zip
+          ROOT=build/copyright-sefaria-otzaria
+          test -s "$ZIP"
+          unzip -t "$ZIP" >/dev/null
+          test -s "$ROOT/metadata.json"
+          test -s "$ROOT/files_manifest.json"
+          EXPORTED=$(jq '.exportedBooks' build/copyright-otzaria-report.json)
+          LINKS=$(jq '.exportedLinks' build/copyright-otzaria-report.json)
+          TXT_COUNT=$(find "$ROOT/אוצריא" -type f -name '*.txt' | wc -l)
+          test "$EXPORTED" -gt 0
+          test "$TXT_COUNT" -eq "$EXPORTED"
+          test "$LINKS" -gt 0 || { echo "::error::Copyright ZIP contains no outbound links."; exit 1; }
+          echo "Copyright ZIP: books=$EXPORTED links=$LINKS"
+
+      - name: Verify Copyright ZIP with the Otzaria database importer
+        if: ${{ inputs.include_copyright_books }}
+        run: |
+          set -euo pipefail
+          VALIDATION_DB=build/copyright-import-validation.db
+          cp --reflink=auto build/seed-seforim.db "$VALIDATION_DB"
+          BEFORE=$(sqlite3 "$VALIDATION_DB" 'SELECT COUNT(*) FROM book;')
+          EXPECTED=$(jq '.exportedBooks' build/copyright-otzaria-report.json)
+          ./gradlew :otzariasqlite:appendOtzaria \
+            -PseforimDb="$PWD/$VALIDATION_DB" \
+            -PsourceDir="$PWD/build/copyright-sefaria-otzaria" \
+            -PnewBookIdsFile="$PWD/build/copyright-validation-book-ids.txt" \
+            -PinMemoryDb=false \
+            -PgeneratorHeap=5g \
+            --no-daemon --stacktrace
+          AFTER=$(sqlite3 "$VALIDATION_DB" 'SELECT COUNT(*) FROM book;')
+          test "$((AFTER-BEFORE))" -eq "$EXPECTED"
+          OUTBOUND=$(sqlite3 "$VALIDATION_DB" \
+            "ATTACH DATABASE '$PWD/build/seed-seforim.db' AS seed; \
+             SELECT COUNT(*) FROM link l \
+             WHERE NOT EXISTS (SELECT 1 FROM seed.book b WHERE b.id=l.sourceBookId) \
+               AND EXISTS (SELECT 1 FROM seed.book b WHERE b.id=l.targetBookId);")
+          test "$OUTBOUND" -gt 0 || { echo "::error::Otzaria importer created no links from Copyright books to seed books."; exit 1; }
+          jq -n \
+            --argjson added "$((AFTER-BEFORE))" \
+            --argjson outboundLinksToSeed "$OUTBOUND" \
+            '{verified: true, addedBooks: $added, outboundLinksToSeed: $outboundLinksToSeed}' \
+            > build/copyright-import-validation.json
+          echo "Otzaria importer verified: added=$((AFTER-BEFORE)) outbound-links-to-seed=$OUTBOUND"
+          rm -f "$VALIDATION_DB"
 
       - name: Validate Otzaria ZIP
         run: |
@@ -146,6 +235,36 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.versions.outputs.artifact_name }}
-          path: build/incremental-sefaria-otzaria.zip
+          path: |
+            build/incremental-sefaria-otzaria.zip
+            build/incremental-sefaria-report.json
+            build/copyright-only-titles.json
+            build/copyright-report-status.json
           if-no-files-found: error
           retention-days: ${{ inputs.retention_days }}
+
+      - name: Upload Hebrew Copyright Otzaria ZIP artifact
+        if: ${{ inputs.include_copyright_books }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.versions.outputs.artifact_name }}-copyright
+          path: |
+            build/copyright-sefaria-otzaria.zip
+            build/copyright-only-titles.json
+            build/copyright-download-status.json
+            build/copyright-otzaria-report.json
+            build/copyright-import-validation.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
+
+      - name: Write ZIP export summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          bash .github/scripts/write-otzaria-zip-summary.sh \
+            build/incremental-sefaria-report.json \
+            build/copyright-only-titles.json \
+            build/copyright-report-status.json \
+            build/copyright-download-status.json \
+            build/copyright-otzaria-report.json \
+            build/copyright-import-validation.json
