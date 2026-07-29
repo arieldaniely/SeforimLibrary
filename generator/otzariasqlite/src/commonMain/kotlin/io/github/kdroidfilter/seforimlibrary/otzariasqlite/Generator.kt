@@ -41,6 +41,8 @@ class DatabaseGenerator(
     private val sourceDirectory: Path,
     private val repository: SeforimRepository,
     private val acronymDbPath: String? = null,
+    private val linksDirectory: Path? = null,
+    private val booksDirectory: Path? = null,
     private val filterSourcesForLinks: Boolean = true,
     private val allocator: IdAllocator = InMemoryIdAllocator.load(path = null),
     private val buildVersion: Int = 0,
@@ -93,6 +95,12 @@ class DatabaseGenerator(
 
     // Library root used for relative path normalization
     private lateinit var libraryRoot: Path
+
+    private fun resolveLibraryDirectory(): Path =
+        booksDirectory ?: sourceDirectory.resolve("\u05d0\u05d5\u05e6\u05e8\u05d9\u05d0")
+
+    private fun resolveLinksDirectory(): Path =
+        linksDirectory ?: sourceDirectory.resolve("links")
 
     // Map from library-relative book key (e.g. "תנ"ך/בראשית.txt") to source name (e.g. "sefariaToOtzaria")
     private val manifestSourcesByRel = mutableMapOf<String, String>()
@@ -1370,9 +1378,9 @@ class DatabaseGenerator(
             headingLineIds.addAll(headingIds)
         }
         logger.i { "Heading lines tracked for filtering: ${headingLineIds.size}" }
-        val linksDir = sourceDirectory.resolve("links")
+        val linksDir = resolveLinksDirectory()
         if (!linksDir.exists()) {
-            logger.w { "Links directory not found" }
+            logger.w { "Links directory not found: $linksDir" }
             return
         }
 
