@@ -6,12 +6,17 @@ import org.apache.lucene.analysis.standard.StandardAnalyzer
 import org.apache.lucene.document.*
 import org.apache.lucene.index.IndexWriter
 import org.apache.lucene.index.IndexWriterConfig
+import org.apache.lucene.index.NoMergePolicy
 import org.apache.lucene.search.Sort
 import org.apache.lucene.search.SortField
 import org.apache.lucene.store.FSDirectory
 import java.nio.file.Path
 
-class LuceneLookupIndexWriter(indexDir: Path, analyzer: Analyzer = StandardAnalyzer()) : LookupIndexWriter {
+class LuceneLookupIndexWriter(
+    indexDir: Path,
+    analyzer: Analyzer = StandardAnalyzer(),
+    append: Boolean = false,
+) : LookupIndexWriter {
     companion object F {
         const val FIELD_TYPE = "type"
         const val TYPE_BOOK = "book"
@@ -36,7 +41,8 @@ class LuceneLookupIndexWriter(indexDir: Path, analyzer: Analyzer = StandardAnaly
 
     init {
         val cfg = IndexWriterConfig(analyzer).apply {
-            openMode = IndexWriterConfig.OpenMode.CREATE
+            openMode = if (append) IndexWriterConfig.OpenMode.CREATE_OR_APPEND else IndexWriterConfig.OpenMode.CREATE
+            if (append) mergePolicy = NoMergePolicy.INSTANCE
             // Ensure base books receive lower docIDs so they win ties in constant-score lookups
             indexSort = Sort(
                 SortField(FIELD_IS_BASE_BOOK, SortField.Type.INT, true),
@@ -44,6 +50,10 @@ class LuceneLookupIndexWriter(indexDir: Path, analyzer: Analyzer = StandardAnaly
             )
         }
         writer = IndexWriter(dir, cfg)
+    }
+
+    override fun deleteBookById(bookId: Long) {
+        writer.deleteDocuments(IntPoint.newExactQuery(FIELD_BOOK_ID, bookId.toInt()))
     }
 
     override fun addBook(

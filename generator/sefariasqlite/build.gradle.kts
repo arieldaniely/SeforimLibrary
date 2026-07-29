@@ -74,6 +74,47 @@ tasks.register<JavaExec>("generateSefariaSqlite") {
     )
 }
 
+// Incrementally add Sefaria books that are allowed by the current blacklists
+// but are missing from an existing release database.
+// Usage:
+//   ./gradlew :sefariasqlite:appendMissingSefaria -PseforimDb=/path/to/seforim.db
+tasks.register<JavaExec>("appendMissingSefaria") {
+    group = "application"
+    description = "Append currently-allowed Sefaria books missing from an existing database."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.GenerateSefariaSqliteKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    val dbPath = if (project.hasProperty("seforimDb")) {
+        project.property("seforimDb") as String
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        System.getenv("SEFORIM_DB")
+    } else {
+        rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    }
+    systemProperty("seforimDb", dbPath)
+    systemProperty("appendExistingDb", "true")
+    systemProperty("onlyMissingBooks", "true")
+    systemProperty("inMemoryDb", "false")
+
+    if (project.hasProperty("exportDir")) {
+        systemProperty("exportDir", project.property("exportDir") as String)
+    }
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
+    if (project.hasProperty("buildVersion")) {
+        systemProperty("buildVersion", project.property("buildVersion") as String)
+    }
+
+    jvmArgs = listOf(
+        "-Xmx$generatorHeap",
+        "-XX:+UseG1GC",
+        "-XX:MaxGCPauseMillis=200"
+    )
+}
+
 // Post-processing step to rename categories after all generation is complete
 // Usage:
 //   ./gradlew :sefariasqlite:renameCategories

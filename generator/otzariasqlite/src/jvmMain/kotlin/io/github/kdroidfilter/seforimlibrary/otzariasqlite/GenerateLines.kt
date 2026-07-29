@@ -51,6 +51,14 @@ fun main(args: Array<String>) = runBlocking {
     ).firstOrNull { !it.isNullOrBlank() }
         ?.let { it.equals("true", ignoreCase = true) || it == "1" }
         ?: false
+    val onlyMissingBooks = listOf(
+        System.getProperty("onlyMissingBooks"),
+        System.getenv("ONLY_MISSING_BOOKS")
+    ).firstOrNull { !it.isNullOrBlank() }
+        ?.let { it.equals("true", ignoreCase = true) || it == "1" }
+        ?: false
+    val newBookIdsPath = System.getProperty("newBookIdsFile")
+        ?: System.getenv("NEW_BOOK_IDS_FILE")
     val persistDbPath = System.getProperty("persistDb")
         ?: System.getenv("SEFORIM_DB_OUT")
         ?: if (appendExistingDb) seforimDbPropOrEnv else null
@@ -146,8 +154,19 @@ fun main(args: Array<String>) = runBlocking {
             acronymDbPath = acronymDbPath,
             allocator = allocator,
             buildVersion = buildVersion,
+            onlyMissingBooks = onlyMissingBooks,
         )
         generator.generateLinesOnly()
+        if (newBookIdsPath != null) {
+            val output = Paths.get(newBookIdsPath)
+            output.parent?.let { Files.createDirectories(it) }
+            val ids = generator.getNewlyAddedBookIds().sorted()
+            Files.writeString(
+                output,
+                if (ids.isEmpty()) "" else ids.joinToString(separator = "\n", postfix = "\n"),
+            )
+            logger.i { "Wrote ${ids.size} new Otzaria book IDs to $output" }
+        }
         if (useMemoryDb) {
             // Persist in-memory DB to disk using VACUUM INTO (target must not exist)
             runCatching {

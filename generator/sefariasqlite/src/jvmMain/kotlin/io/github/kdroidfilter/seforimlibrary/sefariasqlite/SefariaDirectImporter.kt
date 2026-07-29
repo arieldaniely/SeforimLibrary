@@ -32,6 +32,7 @@ class SefariaDirectImporter(
     private val repository: SeforimRepository,
     private val allocator: IdAllocator = InMemoryIdAllocator.load(path = null),
     private val buildVersion: Int = 0,
+    private val onlyMissingBooks: Boolean = false,
     private val logger: Logger = Logger.withTag("SefariaDirectImporter")
 ) {
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
@@ -42,6 +43,16 @@ class SefariaDirectImporter(
         val dbRoot = findDatabaseExportRoot(exportRoot)
         val jsonDir = dbRoot.resolve("json")
         val schemaDir = dbRoot.resolve("schemas")
+        val existingBookIdentities = if (onlyMissingBooks) {
+            repository.getAllBookIdsAndTitles().also {
+                logger.i { "Loaded ${it.size} existing book titles for incremental filtering" }
+            }
+        } else {
+            emptyList()
+        }
+        val existingTitleKeys = existingBookIdentities.mapNotNullTo(HashSet()) { (_, title) ->
+            normalizeTitleKey(title)
+        }
 
         // ─── Phase 2: touched-book detection ───────────────────────────────────
         // Computes a per-book sha256 of the source artefact and classifies books
@@ -49,8 +60,13 @@ class SefariaDirectImporter(
         // observability; the fast-path that skips unchanged books is Phase 2.5.
         // Source hashes are recorded on the allocator at the END of import() so
         // the snapshot persists them for the next build.
-        val currentSourceHashes = SefariaSourceHashComputer(sourceName).compute(dbRoot, buildVersion)
-        run {
+        val currentSourceHashes = if (onlyMissingBooks) {
+            logger.i { "Skipping full-corpus source hashing during incremental append" }
+            emptyMap()
+        } else {
+            SefariaSourceHashComputer(sourceName).compute(dbRoot, buildVersion)
+        }
+        if (!onlyMissingBooks) {
             val previousHashes = currentSourceHashes.keys
                 .mapNotNull { key -> allocator.previousSourceHash(key)?.let { key to it } }
                 .toMap()
@@ -70,17 +86,17 @@ class SefariaDirectImporter(
         // Without this, books like Tikkunei Zohar render broken ❌ placeholders
         // (issue 392). This scan reads all merged.json once; the embedder uses
         // a disk cache under build/sefaria/image-cache so re-runs skip network.
-        val mergedFiles = java.nio.file.Files.walk(jsonDir).use { stream ->
-            stream.filter {
-                java.nio.file.Files.isRegularFile(it) &&
-                    it.fileName.toString().equals("merged.json", ignoreCase = true)
-            }.toList()
-        }
+        val mergedFiles = bookPayloadReader.findMergedFiles(
+            jsonDir = jsonDir,
+            schemaDir = schemaDir,
+            schemaLookup = schemaLookup,
+            excludedTitleKeys = existingTitleKeys,
+        )
         SefariaImageEmbedder.prefetch(mergedFiles, logger = logger)
 
         // Read and parse files in parallel
         logger.i { "Starting parallel file processing..." }
-        val bookPayloads = bookPayloadReader.readBooksInParallel(jsonDir, schemaDir, schemaLookup)
+        val bookPayloads = bookPayloadReader.readBooksInParallel(mergedFiles, schemaDir, schemaLookup)
         logger.i { "Parsed ${bookPayloads.size} books" }
 
         val classLoader = javaClass.classLoader
@@ -108,6 +124,10 @@ class SefariaDirectImporter(
         val priorityEntries = loadPriorityList(classLoader, logger)
         val (orderedBookPayloads, missingPriorityEntriesRaw) =
             applyPriorityOrdering(blacklistResult.payloads, priorityEntries)
+        if (onlyMissingBooks && orderedBookPayloads.isEmpty()) {
+            logger.i { "No currently-allowed Sefaria books are missing; nothing to append" }
+            return@coroutineScope
+        }
         val (blacklistedPriorityEntries, missingPriorityEntries) = missingPriorityEntriesRaw.partition {
             normalizePriorityEntry(it) in blacklistResult.skippedNormalizedPaths
         }
@@ -191,6 +211,11 @@ class SefariaDirectImporter(
         val allRefsWithPath = mutableListOf<RefEntry>()
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
+        existingBookIdentities.forEach { (bookId, title) ->
+            normalizeTitleKey(title)?.let { normalized ->
+                normalizedTitleToBookId.putIfAbsent(normalized, bookId)
+            }
+        }
         val headingLineIds = ConcurrentHashMap.newKeySet<Long>()
         // Deferred base_text_titles → bookId resolution. We can't resolve at
         // book-insert time because a commentary's base text may not have been

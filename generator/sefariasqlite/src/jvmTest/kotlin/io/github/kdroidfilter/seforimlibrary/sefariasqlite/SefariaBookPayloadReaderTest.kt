@@ -11,6 +11,35 @@ import kotlin.test.assertTrue
 
 class SefariaBookPayloadReaderTest {
     @Test
+    fun incrementalFilterSkipsMergedJsonWithoutParsingItsText() {
+        val tempDir = Files.createTempDirectory("seforim-filter-test")
+        val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+        val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+        val bookDir = Files.createDirectories(jsonDir.resolve("Tur"))
+
+        Files.writeString(schemaDir.resolve("Tur.json"), schemaJson)
+        // Invalid JSON proves the filter decided from the schema and did not
+        // parse the large merged payload for an existing book.
+        Files.writeString(bookDir.resolve("merged.json"), "not-json")
+
+        val reader = SefariaBookPayloadReader(
+            Json { ignoreUnknownKeys = true; coerceInputValues = true },
+            Logger.withTag("SefariaBookPayloadReaderTest")
+        )
+        val schemaLookup = reader.buildSchemaLookup(schemaDir)
+        val existingTitle = requireNotNull(normalizeTitleKey("Tur"))
+
+        val mergedFiles = reader.findMergedFiles(
+            jsonDir = jsonDir,
+            schemaDir = schemaDir,
+            schemaLookup = schemaLookup,
+            excludedTitleKeys = setOf(existingTitle),
+        )
+
+        assertTrue(mergedFiles.isEmpty())
+    }
+
+    @Test
     fun defaultNodeWithoutTitleKeepsSimanimAtSameLevelAsIntroduction() = runBlocking {
         val tempDir = Files.createTempDirectory("seforim-test")
         val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
