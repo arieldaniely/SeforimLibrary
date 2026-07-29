@@ -48,7 +48,7 @@ class SefariaOtzariaExporterTest {
         assertEquals(2, result.linkCount)
         assertTrue(outputRoot.resolve("אוצריא/הלכה/א.txt").readText().contains("alpha text"))
         assertTrue(outputRoot.resolve("metadata.json").readText().contains("\"א\""))
-        assertTrue(outputRoot.resolve("files_manifest.json").readText().contains("sefaria/אוצריא/הלכה/א.txt"))
+        assertTrue(outputRoot.resolve("files_manifest.json").readText().contains("Sefaria/אוצריא/הלכה/א.txt"))
         assertTrue(outputRoot.resolve("links/א_links.json").readText().contains("אוצריא/הלכה/ב.txt"))
         assertTrue(outputRoot.resolve("links/ב_links.json").readText().contains("אוצריא/הלכה/א.txt"))
 

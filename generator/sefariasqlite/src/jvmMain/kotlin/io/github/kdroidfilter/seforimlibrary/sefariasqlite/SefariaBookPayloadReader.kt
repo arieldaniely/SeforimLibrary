@@ -139,6 +139,34 @@ internal class SefariaBookPayloadReader(
         return selection(filtered, mergedFiles.size - filtered.size)
     }
 
+    /**
+     * Finds Hebrew merged payloads for a small set of schemas. Incremental
+     * link import uses this to load only existing books adjacent to new books.
+     */
+    fun findMergedFilesForSchemas(
+        jsonDir: Path,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+        wantedSchemas: Set<Path>,
+    ): List<Path> {
+        if (wantedSchemas.isEmpty()) return emptyList()
+        val normalizedWanted = wantedSchemas.mapTo(HashSet()) { it.toAbsolutePath().normalize() }
+        return Files.walk(jsonDir).use { stream ->
+            stream.filter { Files.isRegularFile(it) && isHebrewMergedFile(it) }
+                .filter { textPath ->
+                    val folderName = bookFolderName(textPath) ?: return@filter false
+                    val schemaPath = resolveSchemaPath(
+                        title = null,
+                        heTitle = null,
+                        folderName = folderName,
+                        schemaDir = schemaDir,
+                        lookup = schemaLookup,
+                    ) ?: return@filter false
+                    schemaPath.toAbsolutePath().normalize() in normalizedWanted
+                }
+                .toList()
+        }
+    }
     private fun isHebrewMergedFile(path: Path): Boolean {
         if (!path.fileName.name.equals("merged.json", ignoreCase = true)) return false
         val parent = path.parent ?: return true

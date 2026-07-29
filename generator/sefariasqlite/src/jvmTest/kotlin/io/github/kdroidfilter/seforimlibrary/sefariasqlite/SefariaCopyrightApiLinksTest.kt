@@ -62,5 +62,6 @@ class SefariaCopyrightApiLinksTest {
         assertEquals("בראשית א, א", link.getValue("heRef_2").jsonPrimitive.content)
         assertEquals("אוצריא/תנך/תורה/בראשית.txt", link.getValue("path_2").jsonPrimitive.content)
         assertEquals("commentary", link.getValue("Conection Type").jsonPrimitive.content)
+        assertTrue(link.getValue("source_is_dependent").jsonPrimitive.content.toBoolean())
     }
 }
