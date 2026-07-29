@@ -57,11 +57,23 @@ jobs:
           haskell: true
           large-packages: true
           docker-images: false
+          # חשוב: אנחנו לא מוחקים את ה-swap הקיים כדי לאפשר מקסימום זיכרון
           swap-storage: false
+
+      - name: Allocate massive Swap space (10GB) to prevent OOM
+        run: |
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo sysctl vm.swappiness=10
+          echo "Memory and Swap configuration:"
+          free -h
 
       - name: Bridle daemon heaps + generator forks for the 16 GB runner
         run: |
           mkdir -p ~/.gradle
+          # אנחנו מחזירים ל-8GB כי עכשיו יש לנו 10GB של Swap כגיבוי!
           cat >> ~/.gradle/gradle.properties <<EOF
           org.gradle.jvmargs=-Xmx3g
           kotlin.compiler.execution.strategy=in-process

@@ -1,0 +1,454 @@
+name: Manual Generate + Pre-Release
+
+# End-to-end build pipeline: builds seforim.db from the latest Sefaria +
+# Otzaria sources, runs the LinkerToOtzaria relink serially against this
+# build's own lines snapshot and injects the resulting LINKER links, then
+# packages a split bundle and publishes the lot as a GitHub pre-release.
+# Serial by design: the release always ships a complete link set; a linker
+# failure fails the build loudly (requires the PIPELINE_TOKEN secret).
+#
+# From the second release onwards, the workflow produces a logarithmic
+# fan of delta patches against previous pre-releases at fixed offsets
+# {1, 2, 4, 8, 16}. A client on any version k within those offsets can
+# fetch a *direct* patch; clients further back chain through the
+# available anchors. The full bundle remains the fallback.
+#
+# Anchors auto-discovered from prior pre-release assets — no manual
+# operator input needed. db_version is derived as max(prior versions)+1.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_selection:
+        description: 'בחר על איזה שרת להריץ את הבנייה'
+        required: true
+        default: 'ARM64'
+        type: choice
+        options:
+          - 'ARM64'
+          - 'server-2'
+      prerelease:
+        description: |
+          Publish as a GitHub pre-release (true, default) or a final
+          release (false). Pre-releases stay out of clients that watch
+          /releases/latest; flip to false when the pipeline is stable
+          enough for end users.
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+# Only one release build at a time. A RAM-backed build dir (see the tmpfs step)
+# makes two concurrent runs on the same self-hosted host a memory hazard, and a
+# release pipeline should never race itself. Queue rather than cancel — a build
+# in flight is expensive (hours) and must not be killed mid-way.
+concurrency:
+  group: seforim-manual-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build seforim.db + bundle + delta fan, publish pre-release
+    runs-on: ${{ inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]') }}
+    timeout-minutes: 360
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Logarithmic anchor offsets — covers ~16 versions back with 5 patches.
+      # Older clients chain through the anchors; the full bundle is the
+      # ultimate fallback.
+      PATCH_OFFSETS: "1 2 4 8 16"
+
+    steps:
+      # MUST run before checkout. actions/checkout cleans the workspace with
+      # `git clean -ffdx`, which recurses into the (gitignored) build/ dir; if a
+      # canceled run left build/ as a tmpfs mountpoint, clean cannot rmdir the
+      # mountpoint and checkout fails or hangs. Release any stale mount first.
+      - name: Release stale RAM build dir (pre-checkout)
+        run: |
+          BUILD="$GITHUB_WORKSPACE/build"
+          while mountpoint -q "$BUILD"; do
+            echo "Stale tmpfs at build/ from a prior run — unmounting before checkout."
+            sudo umount "$BUILD" 2>/dev/null || sudo umount -l "$BUILD"
+          done
+
+      - name: Checkout SeforimLibrary
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Disk before build
+        run: df -h
+
+      # ─── RAM-backed build dir (tmpfs) ──────────────────────────────────────
+      # The DB build is fsync-bound on the OCI network block volume: CPU and RAM
+      # sit idle in iowait while SQLite waits on per-commit fsyncs to slow
+      # network storage. Backing build/ with a RAM tmpfs removes that stall.
+      #
+      # Mounted *at* build/ so every path stays byte-identical (build/seforim.db,
+      # build/seforim.db.buildstate, build/seforim.db.zst) — the DB generation
+      # and the delta/buildstate logic are completely untouched. Keep
+      # -PinMemoryDb=false below: file-backed-on-tmpfs is fast *and* avoids the
+      # second in-RAM copy that an in-memory DB would add on top of the tmpfs.
+      #
+      # Guards so a release build never falls and never endangers the other
+      # repos' runners that share this host:
+      #   • size=16G is a HARD cap — a runaway write fails THIS job cleanly with
+      #     ENOSPC instead of OOM-killing the host. Measured peak is ~11.4 GiB
+      #     (seforim.db ~7G + seforim.db.zst ~3.5G + buildstate ~0.9G coexist
+      #     during the compression step), so 16G leaves comfortable headroom.
+      #   • Preflight ABORTS before any work if another Runner.Worker is active
+      #     or MemAvailable < 18 GiB — never share the box, never start tight. A
+      #     clean abort + rerun beats a mid-build OOM, which is the real "fall".
+      #   • A stale mount from a canceled run is released in a pre-checkout step.
+      - name: Mount RAM-backed build dir (tmpfs)
+        run: |
+          set -euo pipefail
+          BUILD="$GITHUB_WORKSPACE/build"
+
+          # Exclusivity: this host runs three self-hosted runners (SeforimLibrary,
+          # otzaria, SefariaExport). A RAM-heavy release build must not share the
+          # box — a later spike in a concurrent job could OOM both. Our own job is
+          # exactly one Runner.Worker; >1 means another repo's job is active.
+          WORKERS=$(pgrep -cf 'Runner.Worker' || true)
+          if [ "${WORKERS:-0}" -gt 1 ]; then
+            echo "::error::${WORKERS} Runner.Worker processes active — another repo's job is running on this shared host. Refusing to start a RAM-backed build; rerun when the host is idle."
+            exit 1
+          fi
+
+          # Peak need is ~18 GiB (8 GiB generator heap + ~7 GiB DB on tmpfs +
+          # Gradle + base). Demand a near-idle box up front rather than risk a
+          # late OOM mid-build.
+          AVAIL_KB=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+          echo "MemAvailable: $((AVAIL_KB/1024/1024)) GiB"
+          if [ "$AVAIL_KB" -lt $((18*1024*1024)) ]; then
+            echo "::error::Only $((AVAIL_KB/1024/1024)) GiB available (<18 GiB). Aborting before work to avoid an OOM."
+            exit 1
+          fi
+
+          # Mount. uid/gid = the runner user so the build can write without sudo.
+          mkdir -p "$BUILD"
+          sudo mount -t tmpfs -o size=16G,nr_inodes=1m,uid="$(id -u)",gid="$(id -g)",mode=0755 tmpfs "$BUILD"
+          echo "tmpfs mounted on build/:"
+          findmnt "$BUILD" || df -h "$BUILD"
+
+      - name: Bridle daemon heaps + generator forks for the 16 GB runner
+        run: |
+          mkdir -p ~/.gradle
+          cat >> ~/.gradle/gradle.properties <<EOF
+          org.gradle.jvmargs=-Xmx3g
+          kotlin.compiler.execution.strategy=in-process
+          generatorHeap=8g
+          EOF
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Install DB workflow dependencies
+        run: bash .github/scripts/install-db-workflow-deps.sh
+
+      # ─── Discover prior releases + decide db_version ───────────────────────
+      # Tags are `v<dbVersion>-<utcTimestamp>` so version discovery is just
+      # a regex on the tag list — no per-release asset fetch needed.
+      # The version chain ignores pre vs final: a final release can seed/diff
+      # against a pre-release predecessor and vice-versa.
+      - name: Auto-discover prior releases
+        id: discover
+        run: |
+          set -euo pipefail
+          gh release list --limit 100 --json tagName,isPrerelease,createdAt,name \
+            > all-releases.json
+          : > prior-versions.tsv  # cols: db_version<TAB>release_tag
+          while IFS= read -r tag; do
+            VER=$(echo "$tag" | grep -oE '^v[0-9]+-' | tr -d 'v-' || true)
+            [ -n "$VER" ] && echo -e "${VER}\t${tag}" >> prior-versions.tsv
+          done < <(jq -r '.[].tagName' all-releases.json)
+          sort -k1,1nr -o prior-versions.tsv prior-versions.tsv
+          echo "Prior releases (db_version → tag):"
+          cat prior-versions.tsv || true
+
+          if [ ! -s prior-versions.tsv ]; then
+            echo "No prior release found — this is the first release."
+            echo "db_version=1" >> "$GITHUB_OUTPUT"
+            echo "has_prev=false" >> "$GITHUB_OUTPUT"
+          else
+            LAST_VER=$(head -n1 prior-versions.tsv | cut -f1)
+            NEXT_VER=$((LAST_VER + 1))
+            LAST_TAG=$(head -n1 prior-versions.tsv | cut -f2)
+            echo "Most recent: db_version=$LAST_VER tag=$LAST_TAG → this build: db_version=$NEXT_VER"
+            echo "db_version=$NEXT_VER" >> "$GITHUB_OUTPUT"
+            echo "has_prev=true" >> "$GITHUB_OUTPUT"
+            echo "seed_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute release tag (v<dbVersion>-<timestamp>)
+        id: release_meta
+        run: |
+          STAMP=$(date -u +"%Y%m%d%H%M%S")
+          TAG="v${{ steps.discover.outputs.db_version }}-${STAMP}"
+          echo "release_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: ${TAG}"
+
+      - name: Seed allocator from offset-1 release
+        if: steps.discover.outputs.has_prev == 'true'
+        run: |
+          set -euo pipefail
+          SEED_TAG="${{ steps.discover.outputs.seed_tag }}"
+          echo "Seeding allocator from release '$SEED_TAG'"
+          mkdir -p build prev-dbs
+          gh release download "$SEED_TAG" \
+            --pattern 'seforim.db.buildstate' \
+            --dir build
+          # Buildstate goes where generateSeforimDb expects it.
+          ls -lh build/seforim.db.buildstate
+
+      # ─── Build seforim.db (full pipeline) ──────────────────────────────────
+      # -PinMemoryDb=false: the Lucene index step otherwise copies the entire
+      # ~7 GB seforim.db into a SQLite mode=memory database to speed up reads.
+      # On the 16 GB runner that native footprint plus the 8 GB generator heap
+      # blows past physical RAM and the kernel OOM-kills the job (surfacing as
+      # "The operation was canceled"). Reading the DB from disk keeps the peak
+      # bounded; the indexing stays well within budget.
+      - name: Generate Seforim Database
+        run: |
+          # -PlinkerSidecar makes the Sefaria import dump the RefEntry→lineId sidecar
+          # this build's LINKER Phase-2 needs (see next step).
+          ./gradlew generateSeforimDb \
+            -PreleaseName=${{ steps.release_meta.outputs.release_tag }} \
+            -PdbVersion=${{ steps.discover.outputs.db_version }} \
+            -PinMemoryDb=false \
+            -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
+            --no-daemon --stacktrace
+          # catalog.pb is no longer produced; drop any stale copy so a dirty
+          # self-hosted workspace can't smuggle it into the bundle or a patch.
+          rm -f build/catalog.pb
+
+      # ─── Serial linker cycle: snapshot → relink → inject, all IN this build ───
+      # The linker's offsets are only valid against THIS build's cleaned line text, so the
+      # snapshot must be dumped first, the linker re-links exactly the books it changed
+      # (delta — minutes), and Phase-2 injects the fresh artifacts back into this same DB.
+      # The published release therefore always carries a COMPLETE link set (no one-cycle lag).
+      - name: Dump lines snapshot for the linker
+        run: |
+          set -euo pipefail
+          ./gradlew :packaging:dumpLines \
+            -PseforimDb=$PWD/build/seforim.db \
+            -PlinesSnapshot=$PWD/build/lines_snapshot.db \
+            --no-daemon --stacktrace
+          zstd -T0 -19 -f -o build/lines_snapshot.db.zst build/lines_snapshot.db
+          rm -f build/lines_snapshot.db
+
+      # Hand the snapshot to the relink run as a workflow artifact of THIS run —
+      # deterministic (no "latest release" race) and works before any release exists.
+      - name: Upload snapshot artifact for the relink run
+        uses: actions/upload-artifact@v4
+        with:
+          name: lines-snapshot
+          path: build/lines_snapshot.db.zst
+          retention-days: 7
+          if-no-files-found: error
+
+      # Trigger the incremental relink on LinkerToOtzaria against THIS snapshot and wait.
+      # Serial by design: the DB release depends on the relink succeeding — a linker
+      # failure fails this build loudly instead of shipping a DB with silent gaps.
+      # Cross-repo dispatch/watch/download needs PIPELINE_TOKEN (PAT), not GITHUB_TOKEN.
+      - name: Run LinkerToOtzaria relink on this snapshot (and wait)
+        id: relink
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN secret is empty or missing on this repo — re-run: gh secret set PIPELINE_TOKEN -R Otzaria/SeforimLibrary"; exit 1; }
+          gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
+            -f library_run_id=${{ github.run_id }}
+          # Identify OUR run deterministically: relink.yml stamps library_run_id into its
+          # run-name, so a concurrent manual dispatch can never be picked up by mistake.
+          RUN=""
+          for _ in $(seq 1 30); do
+            sleep 10
+            RUN=$(gh run list -R Otzaria/LinkerToOtzaria -w relink.yml -L20 \
+              --json databaseId,displayTitle \
+              -q '[.[] | select(.displayTitle | contains("library_run_id=${{ github.run_id }}"))][0].databaseId')
+            [ -n "$RUN" ] && break
+          done
+          [ -n "$RUN" ] || { echo "::error::relink run for library_run_id=${{ github.run_id }} never appeared"; exit 1; }
+          echo "relink run: $RUN"
+          echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
+          gh run watch "$RUN" -R Otzaria/LinkerToOtzaria --exit-status
+
+      # Inject the artifacts the relink run just produced into THIS DB. Downloaded from
+      # that exact run (not "latest release") so the handshake is fully deterministic.
+      # -PlinkerStrict: in the serial cycle every source line must map and hash-match;
+      # any stale/unmapped source means broken lineage → fail the build.
+      - name: Apply LINKER links (Phase-2)
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf build/linker && mkdir -p build/linker
+          gh run download ${{ steps.relink.outputs.run_id }} -R Otzaria/LinkerToOtzaria \
+            -n linker-links -D build/linker
+          tar --use-compress-program=unzstd -xf build/linker/linker_links.zst -C build/linker
+          ./gradlew :sefariasqlite:generateLinkerLinks \
+            -PseforimDb=$PWD/build/seforim.db \
+            -PlinkerArtifacts=$PWD/build/linker/artifacts \
+            -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
+            -PlinkerStrict=true \
+            --no-daemon --stacktrace
+
+      # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
+      # The prev DB is reconstituted from the release's compressed seforim.db.zst.
+      # Each iteration downloads + decompresses, runs the producer, then
+      # frees everything so disk peak stays bounded.
+      - name: Produce + verify patch fan
+        if: steps.discover.outputs.has_prev == 'true'
+        run: |
+          set -euo pipefail
+          THIS_VER=${{ steps.discover.outputs.db_version }}
+          mkdir -p patches prev-dbs
+          for OFFSET in $PATCH_OFFSETS; do
+            TARGET_VER=$((THIS_VER - OFFSET))
+            if [ "$TARGET_VER" -lt 1 ]; then
+              echo "offset $OFFSET would target version $TARGET_VER (<1) — skip"
+              continue
+            fi
+            TAG=$(awk -F'\t' -v v="$TARGET_VER" '$1==v{print $2; exit}' prior-versions.tsv || true)
+            if [ -z "$TAG" ]; then
+              echo "No prior release at db_version=$TARGET_VER (offset $OFFSET) — skip"
+              continue
+            fi
+            echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
+            rm -rf prev-dbs
+            mkdir -p prev-dbs
+            gh release download "$TAG" \
+              --pattern 'seforim.db.zst' \
+              --dir prev-dbs
+            unzstd -c prev-dbs/seforim.db.zst > prev-dbs/seforim.db
+            PREV_DB=prev-dbs/seforim.db
+            test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; exit 1; }
+
+            ./gradlew :generator-common:producePatchAndVerify \
+              -PprevDb=$PWD/$PREV_DB \
+              -PnewDb=$PWD/build/seforim.db \
+              -Pout=$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db \
+              -PfromVersion=$TARGET_VER -PtoVersion=$THIS_VER \
+              --no-daemon --stacktrace
+
+            # Free disk for the next iteration — only the .zst + manifest
+            # need to ship; the .db was the verify ground-truth.
+            rm -rf prev-dbs
+            rm -f "patches/patch-v${TARGET_VER}-v${THIS_VER}.db" \
+                  "patches/verify-patch-v${TARGET_VER}-v${THIS_VER}.db"
+            df -h /
+          done
+          echo "=== Final patch artefacts ==="
+          ls -lh patches/ || true
+
+      # Compress the full DB into a single .zst for the release. Done after the
+      # delta phase so build/seforim.db (the diff ground-truth) and the .zst
+      # don't both sit on disk during the patch fan.
+      - name: Compress Seforim Database (zstd)
+        run: zstd -T0 -22 -f -o build/seforim.db.zst build/seforim.db
+
+      # ─── Stage release assets ──────────────────────────────────────────────
+      - name: Stage release assets
+        run: |
+          set -euo pipefail
+          STAGE=release-staging
+          mkdir -p "$STAGE"
+          # Full DB, compressed — canonical source of the DB.
+          # Future releases reconstitute the prev DB from this.
+          cp build/seforim.db.zst "$STAGE/"
+          cp build/seforim.db.buildstate "$STAGE/"
+          # Lines snapshot for the linker (lineage + manual/standalone relink runs;
+          # the serial cycle already handed it to relink as a workflow artifact).
+          cp build/lines_snapshot.db.zst "$STAGE/"
+          # Patch fan (zero or more files; only present from release #2 on).
+          if compgen -G "patches/patch-*.db.zst" > /dev/null; then
+            cp patches/patch-*.db.zst "$STAGE/"
+            cp patches/patch-*.db.zst.manifest.json "$STAGE/"
+          fi
+          echo "Staged assets:"
+          ls -lh "$STAGE/"
+          # Sanity: every asset must fit GitHub's 2 GiB per-asset cap.
+          MAX=2147483647
+          OVER=$(find "$STAGE" -maxdepth 1 -type f -size +${MAX}c)
+          if [ -n "$OVER" ]; then
+            echo "::error::Asset(s) exceed GitHub's 2 GiB single-file limit:"
+            ls -lh $OVER
+            exit 1
+          fi
+
+      - name: Create GitHub pre-release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.release_tag }}
+          name: ${{ steps.release_meta.outputs.release_tag }}
+          draft: false
+          prerelease: ${{ inputs.prerelease }}
+          files: release-staging/*
+
+      # Regenerate release-manifest.json inline and push it to otzaria (the main
+      # branch). We can't dispatch the separate update-release-manifest workflow
+      # from here (GITHUB_TOKEN is blocked from triggering other workflows to
+      # prevent recursion). Doing it inline gives atomicity — the manifest
+      # reflects the release we just published before this run finishes.
+      - name: Refresh release-manifest.json on otzaria
+        run: |
+          set -euo pipefail
+          # `gh release view` (no args) → the "Latest" tagged release. With
+          # only pre-releases the call fails; in that case the manifest's
+          # `latest` field stays null.
+          if LATEST_JSON=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null); then
+            LATEST_ARG=(--argjson latest "$LATEST_JSON")
+          else
+            LATEST_ARG=(--argjson latest null)
+          fi
+          ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 100)
+          GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          jq -n \
+            --arg generatedAt "$GENERATED_AT" \
+            "${LATEST_ARG[@]}" \
+            --argjson releases "$ALL_RELEASES" \
+            '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
+            > release-manifest.json
+          echo "release-manifest.json:"
+          cat release-manifest.json
+
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add release-manifest.json
+          if git diff --staged --quiet; then
+            echo "Manifest unchanged — nothing to commit."
+          else
+            git commit -m "Update release manifest [skip ci]"
+            # Rebase onto remote otzaria in case any concurrent push landed
+            # between the start of this job and now.
+            git pull --rebase origin otzaria
+            git push origin HEAD:otzaria
+          fi
+
+      # Release the RAM tmpfs no matter how the job ended. By now assets are
+      # already uploaded and staged on real disk, so discarding build/ is safe;
+      # leaving the mount would pin ~GBs of RAM and trip the next run's sweep.
+      - name: Release RAM-backed build dir (tmpfs)
+        if: always()
+        run: |
+          BUILD="$GITHUB_WORKSPACE/build"
+          if mountpoint -q "$BUILD"; then
+            sudo umount "$BUILD" 2>/dev/null || sudo umount -l "$BUILD"
+            echo "Unmounted tmpfs build dir; RAM released."
+          else
+            echo "No tmpfs mount to release."
+          fi
