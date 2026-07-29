@@ -2,7 +2,8 @@ name: Incremental Sefaria to Otzaria ZIP
 
 # Read the latest published database as a baseline, then export only Sefaria
 # books allowed by the current blacklists and absent from that baseline.
-# The seed DB is opened read-only; this workflow never builds or modifies a DB.
+# The seed DB stays read-only. Optional importer validation, disabled by default,
+# modifies only a temporary copy after both ZIP exports are complete.
 
 on:
   workflow_dispatch:
@@ -23,7 +24,12 @@ on:
         default: 30
         type: number
       include_copyright_books:
-        description: Also build a separate Otzaria ZIP from Hebrew Copyright versions via the Sefaria API
+        description: Also build a supplemental Otzaria ZIP for Hebrew books missing from the bulk export (including Copyright versions)
+        required: false
+        default: false
+        type: boolean
+      validate_with_importer:
+        description: Validate the optional supplemental ZIP by importing it into a temporary copy of the seed database
         required: false
         default: false
         type: boolean
@@ -74,7 +80,7 @@ jobs:
       - name: Install archive tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends jq unzip zstd
+          sudo apt-get install -y --no-install-recommends jq sqlite3 unzip zstd
           chmod +x gradlew
 
       - name: Resolve seed version
@@ -120,89 +126,149 @@ jobs:
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace
 
-      - name: Build Hebrew copyright exclusion report
+      - name: Build missing Hebrew books report
+        id: supplemental_report
         run: |
           python3 .github/scripts/build-sefaria-copyright-report.py \
             --input build/incremental-sefaria-report.json \
-            --output build/copyright-only-titles.json \
-            --status build/copyright-report-status.json \
+            --output build/supplemental-hebrew-titles.json \
+            --status build/supplemental-report-status.json \
             --workers 8
+          echo "count=$(jq 'length' build/supplemental-hebrew-titles.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Download Hebrew Copyright books and outbound links
-        if: ${{ inputs.include_copyright_books }}
+      - name: Download supplemental Hebrew books and outbound links
+        if: ${{ inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' }}
         run: |
           python3 .github/scripts/download-sefaria-copyright-export.py \
-            --report build/copyright-only-titles.json \
+            --report build/supplemental-hebrew-titles.json \
             --export-root build/sefaria/export \
-            --manifest build/copyright-merged-files.txt \
-            --links build/copyright-api-links.json \
-            --status build/copyright-download-status.json \
+            --manifest build/supplemental-merged-files.txt \
+            --links build/supplemental-api-links.json \
+            --status build/supplemental-download-status.json \
+            --books-blacklist generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt \
+            --authors-blacklist generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt \
             --workers 2
 
-      - name: Export Hebrew Copyright books as a separate Otzaria ZIP
-        if: ${{ inputs.include_copyright_books }}
+      - name: Export supplemental Hebrew books as a separate Otzaria ZIP
+        if: ${{ inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' }}
         run: |
           ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
             -PseedDb="$PWD/build/seed-seforim.db" \
             -PexportDir="$PWD/build/sefaria/export" \
-            -PmergedFilesList="$PWD/build/copyright-merged-files.txt" \
-            -PapiLinksPath="$PWD/build/copyright-api-links.json" \
-            -PreportSource="Sefaria API Hebrew Copyright versions" \
-            -PotzariaOutputDir="$PWD/build/copyright-sefaria-otzaria" \
-            -PotzariaOutputZip="$PWD/build/copyright-sefaria-otzaria.zip" \
-            -PincrementalReport="$PWD/build/copyright-otzaria-report.json" \
+            -PmergedFilesList="$PWD/build/supplemental-merged-files.txt" \
+            -PapiLinksPath="$PWD/build/supplemental-api-links.json" \
+            -PreportSource="Sefaria API supplemental Hebrew versions" \
+            -PotzariaOutputDir="$PWD/build/supplemental-sefaria-otzaria" \
+            -PotzariaOutputZip="$PWD/build/supplemental-sefaria-otzaria.zip" \
+            -PincrementalReport="$PWD/build/supplemental-otzaria-report.json" \
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace
 
-      - name: Validate Hebrew Copyright Otzaria ZIP
-        if: ${{ inputs.include_copyright_books }}
+      - name: Validate supplemental Hebrew Otzaria ZIP
+        if: ${{ inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' }}
         run: |
           set -euo pipefail
-          ZIP=build/copyright-sefaria-otzaria.zip
-          ROOT=build/copyright-sefaria-otzaria
+          ZIP=build/supplemental-sefaria-otzaria.zip
+          ROOT=build/supplemental-sefaria-otzaria
           test -s "$ZIP"
           unzip -t "$ZIP" >/dev/null
           test -s "$ROOT/metadata.json"
           test -s "$ROOT/files_manifest.json"
-          EXPORTED=$(jq '.exportedBooks' build/copyright-otzaria-report.json)
-          LINKS=$(jq '.exportedLinks' build/copyright-otzaria-report.json)
+          EXPORTED=$(jq '.exportedBooks' build/supplemental-otzaria-report.json)
+          LINKS=$(jq '.exportedLinks' build/supplemental-otzaria-report.json)
           TXT_COUNT=$(find "$ROOT/אוצריא" -type f -name '*.txt' | wc -l)
           test "$EXPORTED" -gt 0
           test "$TXT_COUNT" -eq "$EXPORTED"
-          test "$LINKS" -gt 0 || { echo "::error::Copyright ZIP contains no outbound links."; exit 1; }
-          echo "Copyright ZIP: books=$EXPORTED links=$LINKS"
+          ZIP_BYTES=$(stat -c%s "$ZIP")
+          ZIP_SHA256=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          jq -n \
+            --argjson exportedBooks "$EXPORTED" \
+            --argjson textFiles "$TXT_COUNT" \
+            --argjson exportedLinks "$LINKS" \
+            --argjson zipBytes "$ZIP_BYTES" \
+            --arg zipSha256 "$ZIP_SHA256" \
+            '{verified: true, exportedBooks: $exportedBooks, textFiles: $textFiles, exportedLinks: $exportedLinks, zipBytes: $zipBytes, zipSha256: $zipSha256}' \
+            > build/supplemental-zip-validation.json
+          echo "Supplemental ZIP verified: books=$EXPORTED text-files=$TXT_COUNT links=$LINKS bytes=$ZIP_BYTES"
 
-      - name: Verify Copyright ZIP with the Otzaria database importer
-        if: ${{ inputs.include_copyright_books }}
+      - name: Download seed buildstate for optional importer validation
+        id: seed_state
+        continue-on-error: true
+        if: ${{ inputs.validate_with_importer && inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' }}
         run: |
           set -euo pipefail
-          VALIDATION_DB=build/copyright-import-validation.db
+          mkdir -p seed-state
+          gh release download '${{ steps.versions.outputs.seed_tag }}' \
+            --repo "$SEED_REPOSITORY" \
+            --pattern 'seforim.db.buildstate' \
+            --dir seed-state
+          test -s seed-state/seforim.db.buildstate
+          mv seed-state/seforim.db.buildstate build/seed-seforim.db.buildstate
+          rmdir seed-state
+
+      - name: Optionally verify supplemental ZIP with the Otzaria importer
+        id: importer_validation
+        continue-on-error: true
+        if: ${{ inputs.validate_with_importer && inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' && steps.seed_state.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          VALIDATION_DB=build/supplemental-import-validation.db
+          VALIDATION_STATE=build/supplemental-import-validation.db.buildstate
+          IDS_FILE=build/supplemental-validation-book-ids.txt
           cp --reflink=auto build/seed-seforim.db "$VALIDATION_DB"
+          cp build/seed-seforim.db.buildstate "$VALIDATION_STATE"
           BEFORE=$(sqlite3 "$VALIDATION_DB" 'SELECT COUNT(*) FROM book;')
-          EXPECTED=$(jq '.exportedBooks' build/copyright-otzaria-report.json)
+          EXPECTED=$(jq '.exportedBooks' build/supplemental-otzaria-report.json)
           ./gradlew :otzariasqlite:appendOtzaria \
             -PseforimDb="$PWD/$VALIDATION_DB" \
-            -PsourceDir="$PWD/build/copyright-sefaria-otzaria" \
-            -PnewBookIdsFile="$PWD/build/copyright-validation-book-ids.txt" \
+            -PsourceDir="$PWD/build/supplemental-sefaria-otzaria" \
+            -PnewBookIdsFile="$PWD/$IDS_FILE" \
+            -PbuildStatePath="$PWD/$VALIDATION_STATE" \
             -PinMemoryDb=false \
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace
           AFTER=$(sqlite3 "$VALIDATION_DB" 'SELECT COUNT(*) FROM book;')
-          test "$((AFTER-BEFORE))" -eq "$EXPECTED"
+          ADDED=$((AFTER-BEFORE))
+          IMPORTED_IDS=$(grep -cve '^[[:space:]]*$' "$IDS_FILE" || true)
+          UNIQUE_IMPORTED_IDS=$(awk '/^[0-9]+$/ { print }' "$IDS_FILE" | sort -nu | wc -l)
+          IDS_CSV=$(awk '/^[0-9]+$/ { print }' "$IDS_FILE" | sort -nu | paste -sd, -)
+          COLLIDING_SEED_IDS=0
+          if [ -n "$IDS_CSV" ]; then
+            COLLIDING_SEED_IDS=$(sqlite3 build/seed-seforim.db "SELECT COUNT(*) FROM book WHERE id IN ($IDS_CSV);")
+          fi
           OUTBOUND=$(sqlite3 "$VALIDATION_DB" \
             "ATTACH DATABASE '$PWD/build/seed-seforim.db' AS seed; \
              SELECT COUNT(*) FROM link l \
              WHERE NOT EXISTS (SELECT 1 FROM seed.book b WHERE b.id=l.sourceBookId) \
                AND EXISTS (SELECT 1 FROM seed.book b WHERE b.id=l.targetBookId);")
-          test "$OUTBOUND" -gt 0 || { echo "::error::Otzaria importer created no links from Copyright books to seed books."; exit 1; }
+          STATE_SHA256=$(sha256sum build/seed-seforim.db.buildstate | cut -d' ' -f1)
+          VERIFIED=true
+          ERROR_MESSAGE=""
+          if [ "$ADDED" -ne "$EXPECTED" ] || \
+             [ "$IMPORTED_IDS" -ne "$EXPECTED" ] || \
+             [ "$UNIQUE_IMPORTED_IDS" -ne "$EXPECTED" ] || \
+             [ "$COLLIDING_SEED_IDS" -ne 0 ]; then
+            VERIFIED=false
+            ERROR_MESSAGE="import count or stable-ID validation failed"
+          fi
           jq -n \
-            --argjson added "$((AFTER-BEFORE))" \
+            --argjson verified "$VERIFIED" \
+            --argjson expectedBooks "$EXPECTED" \
+            --argjson addedBooks "$ADDED" \
+            --argjson importerIds "$IMPORTED_IDS" \
+            --argjson uniqueImporterIds "$UNIQUE_IMPORTED_IDS" \
+            --argjson collidingSeedIds "$COLLIDING_SEED_IDS" \
             --argjson outboundLinksToSeed "$OUTBOUND" \
-            '{verified: true, addedBooks: $added, outboundLinksToSeed: $outboundLinksToSeed}' \
-            > build/copyright-import-validation.json
-          echo "Otzaria importer verified: added=$((AFTER-BEFORE)) outbound-links-to-seed=$OUTBOUND"
-          rm -f "$VALIDATION_DB"
-
+            --arg buildStateSha256 "$STATE_SHA256" \
+            --arg error "$ERROR_MESSAGE" \
+            '{verified: $verified, expectedBooks: $expectedBooks, addedBooks: $addedBooks, importerIds: $importerIds, uniqueImporterIds: $uniqueImporterIds, collidingSeedIds: $collidingSeedIds, outboundLinksToSeed: $outboundLinksToSeed, buildStateSha256: $buildStateSha256, error: (if $error == "" then null else $error end)}' \
+            > build/supplemental-import-validation.json
+          if [ "$VERIFIED" != true ]; then
+            echo "::error::Optional importer validation failed: exported=$EXPECTED added=$ADDED importer-ids=$IMPORTED_IDS unique-ids=$UNIQUE_IMPORTED_IDS ids-already-in-seed=$COLLIDING_SEED_IDS."
+            exit 1
+          fi
+          echo "Optional importer validation passed: added=$ADDED outbound-links-to-seed=$OUTBOUND"
+          rm -f "$VALIDATION_DB" "$VALIDATION_STATE"
       - name: Validate Otzaria ZIP
         run: |
           set -euo pipefail
@@ -238,23 +304,46 @@ jobs:
           path: |
             build/incremental-sefaria-otzaria.zip
             build/incremental-sefaria-report.json
-            build/copyright-only-titles.json
-            build/copyright-report-status.json
+            build/supplemental-hebrew-titles.json
+            build/supplemental-report-status.json
           if-no-files-found: error
           retention-days: ${{ inputs.retention_days }}
 
-      - name: Upload Hebrew Copyright Otzaria ZIP artifact
-        if: ${{ inputs.include_copyright_books }}
+      - name: Upload supplemental Hebrew Otzaria ZIP artifact
+        if: ${{ inputs.include_copyright_books && steps.supplemental_report.outputs.count != '0' }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.versions.outputs.artifact_name }}-copyright
+          name: ${{ steps.versions.outputs.artifact_name }}-supplemental
           path: |
-            build/copyright-sefaria-otzaria.zip
-            build/copyright-only-titles.json
-            build/copyright-download-status.json
-            build/copyright-otzaria-report.json
-            build/copyright-import-validation.json
+            build/supplemental-sefaria-otzaria.zip
+            build/supplemental-hebrew-titles.json
+            build/supplemental-download-status.json
+            build/supplemental-otzaria-report.json
+            build/supplemental-zip-validation.json
+            build/supplemental-import-validation.json
+            build/supplemental-validation-book-ids.txt
+            build/supplemental-report-status.json
+            build/supplemental-merged-files.txt
+            build/supplemental-api-links.json
           if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
+
+      - name: Upload supplemental ZIP diagnostics
+        if: ${{ always() && inputs.include_copyright_books }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.versions.outputs.artifact_name }}-supplemental-diagnostics
+          path: |
+            build/supplemental-hebrew-titles.json
+            build/supplemental-report-status.json
+            build/supplemental-download-status.json
+            build/supplemental-otzaria-report.json
+            build/supplemental-zip-validation.json
+            build/supplemental-import-validation.json
+            build/supplemental-validation-book-ids.txt
+            build/supplemental-merged-files.txt
+            build/supplemental-api-links.json
+          if-no-files-found: warn
           retention-days: ${{ inputs.retention_days }}
 
       - name: Write ZIP export summary
@@ -263,8 +352,13 @@ jobs:
         run: |
           bash .github/scripts/write-otzaria-zip-summary.sh \
             build/incremental-sefaria-report.json \
-            build/copyright-only-titles.json \
-            build/copyright-report-status.json \
-            build/copyright-download-status.json \
-            build/copyright-otzaria-report.json \
-            build/copyright-import-validation.json
+            build/supplemental-hebrew-titles.json \
+            build/supplemental-report-status.json \
+            build/supplemental-download-status.json \
+            build/supplemental-otzaria-report.json \
+            build/supplemental-zip-validation.json \
+            '${{ steps.versions.outputs.seed_tag }}' \
+            '${{ steps.versions.outputs.artifact_name }}' \
+            '${{ inputs.include_copyright_books }}' \
+            build/supplemental-import-validation.json \
+            '${{ inputs.validate_with_importer }}'

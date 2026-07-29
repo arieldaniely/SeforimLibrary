@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download Hebrew copyright-only Sefaria texts and their outbound links."""
+"""Download supplemental Hebrew Sefaria texts missing from the bulk export and their links."""
 
 from __future__ import annotations
 
@@ -133,14 +133,82 @@ def scan_direct_links(database_export: Path, titles: list[str]) -> dict[str, lis
     return by_title
 
 
+def normalize_title_key(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace('"', "").replace("'", "").replace("׳", "").replace("״", "").replace("_", " ").lower()).strip()
+
+
+def load_blacklist_entries(path: Path) -> list[str]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Blacklist file not found: {path}")
+    entries = []
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        value = raw.strip()
+        if value and not value.startswith("#"):
+            entries.append(value.replace('\\"', '"').replace("\\'", "'"))
+    return entries
+
+
+def prefilter_blacklisted_items(
+    items: list[dict],
+    database_export: Path,
+    books_blacklist: Path,
+    authors_blacklist: Path,
+) -> tuple[list[dict], list[dict]]:
+    book_entries = load_blacklist_entries(books_blacklist)
+    author_keys = {normalize_title_key(value) for value in load_blacklist_entries(authors_blacklist)}
+    book_title_keys = {normalize_title_key(value) for value in book_entries}
+    book_path_keys = {
+        value.strip().replace("\\", "/").strip("/")
+        for value in book_entries
+        if "/" in value or "\\" in value
+    }
+    allowed = []
+    blocked = []
+    for item in items:
+        schema_title = safe_schema_title(item.get("schemaTitle"))
+        schema_path = database_export / "schemas" / f"{schema_title}.json"
+        schema_doc = json.loads(schema_path.read_text(encoding="utf-8")) if schema_path.is_file() else {}
+        schema = schema_doc.get("schema") or {}
+        titles = {
+            normalize_title_key(item.get("schemaTitle")),
+            normalize_title_key(item.get("title")),
+            normalize_title_key(item.get("heTitle")),
+            normalize_title_key(schema.get("title")),
+            normalize_title_key(schema.get("heTitle")),
+        }
+        title_blocked = any(title and title in book_title_keys for title in titles)
+
+        categories = schema_doc.get("heCategories") or schema.get("heCategories") or []
+        book_path = "/".join([str(value).replace('"', "״").strip() for value in categories] + [str(item.get("heTitle") or "").replace('"', "״").strip()])
+        path_blocked = book_path in book_path_keys
+
+        author_values = []
+        for author in schema_doc.get("authors") or []:
+            if isinstance(author, dict):
+                author_values.extend([author.get("he"), author.get("en")])
+            else:
+                author_values.append(author)
+        author_blocked = any(normalize_title_key(author) in author_keys for author in author_values if author)
+
+        if title_blocked or path_blocked or author_blocked:
+            reasons = []
+            if title_blocked or path_blocked:
+                reasons.append("book")
+            if author_blocked:
+                reasons.append("author")
+            blocked.append({"schemaTitle": schema_title, "heTitle": item.get("heTitle"), "reasons": reasons})
+        else:
+            allowed.append(item)
+    return allowed, blocked
+
 def bottom_section_ref(ref: str) -> str:
     start = normalize_ref(ref).split("-", 1)[0].strip()
     return start.rsplit(":", 1)[0] if ":" in start else start
 
 
-def download_links(direct_links: list[dict]) -> list[dict]:
+def download_links(direct_links: list[dict]) -> tuple[list[dict], list[dict]]:
     if not direct_links:
-        return []
+        return [], []
     section_refs = sorted({bottom_section_ref(link["anchorRef"]) for link in direct_links})
     raw_links = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -153,10 +221,16 @@ def download_links(direct_links: list[dict]) -> list[dict]:
             for ref in section_refs
         }
         for future in concurrent.futures.as_completed(futures):
-            response = future.result()
-            if not isinstance(response, list):
-                raise ValueError(f"Unexpected links response for {futures[future]}")
-            raw_links.extend(response)
+            section_ref = futures[future]
+            try:
+                response = future.result()
+                if not isinstance(response, list):
+                    raise ValueError("Unexpected links response")
+                raw_links.extend(response)
+            except Exception:
+                # The per-target Text API fallback below can still resolve every
+                # genuine pair found in the bulk CSV when a Links API section fails.
+                continue
 
     api_by_pair = {}
     api_by_target = {}
@@ -174,27 +248,67 @@ def download_links(direct_links: list[dict]) -> list[dict]:
         for link in direct_links
         if normalize_ref(link["sourceRef"]) not in api_by_target
     }
+    target_errors = {}
     if missing_targets:
         def fetch_he_ref(target: str) -> tuple[str, str | None]:
-            response = fetch_json(
-                f"/api/texts/{urllib.parse.quote(target, safe='')}",
-                {"context": "0", "commentary": "0", "pad": "1"},
-            )
-            return target, response.get("heRef") if isinstance(response, dict) else None
+            encoded_target = urllib.parse.quote(target, safe="")
+            failures = []
+            try:
+                response = fetch_json(
+                    f"/api/texts/{encoded_target}",
+                    {"context": "0", "commentary": "0", "pad": "1"},
+                )
+                he_ref = response.get("heRef") if isinstance(response, dict) else None
+                if he_ref:
+                    return target, he_ref
+                failures.append("v1 returned no heRef")
+            except Exception as error:
+                failures.append(f"v1: {error}")
+
+            try:
+                response = fetch_json(
+                    f"/api/v3/texts/{encoded_target}",
+                    {"version": "primary"},
+                )
+                he_ref = response.get("heRef") if isinstance(response, dict) else None
+                if he_ref:
+                    return target, he_ref
+                failures.append("v3 returned no heRef")
+            except Exception as error:
+                failures.append(f"v3: {error}")
+            raise ValueError("; ".join(failures))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            for target, he_ref in executor.map(fetch_he_ref, sorted(missing_targets)):
-                if he_ref:
-                    api_by_target[target] = he_ref
+            futures = {executor.submit(fetch_he_ref, target): target for target in sorted(missing_targets)}
+            for future in concurrent.futures.as_completed(futures):
+                target = futures[future]
+                try:
+                    _, he_ref = future.result()
+                    if he_ref:
+                        api_by_target[target] = he_ref
+                    else:
+                        target_errors[target] = "Text API returned no heRef"
+                except Exception as error:
+                    target_errors[target] = str(error)
 
     resolved = []
     unresolved = []
+    seen_unresolved = set()
     for link in direct_links:
         anchor = normalize_ref(link["anchorRef"])
         target = normalize_ref(link["sourceRef"])
         he_ref = api_by_pair.get((anchor, target)) or api_by_target.get(target)
         if not he_ref:
-            unresolved.append(target)
+            key = (anchor, target)
+            if key not in seen_unresolved:
+                seen_unresolved.add(key)
+                unresolved.append(
+                    {
+                        "anchorRef": anchor,
+                        "sourceRef": target,
+                        "error": target_errors.get(target, "Could not resolve Hebrew ref"),
+                    }
+                )
             continue
         resolved.append(
             {
@@ -205,9 +319,8 @@ def download_links(direct_links: list[dict]) -> list[dict]:
                 "connectionType": link["connectionType"],
             }
         )
-    if unresolved:
-        raise ValueError(f"Could not resolve {len(unresolved)} direct Sefaria links to Hebrew refs")
-    return resolved
+    return resolved, unresolved
+
 
 def merge_text(primary: object, fallback: object) -> object:
     if isinstance(primary, str):
@@ -224,6 +337,195 @@ def merge_text(primary: object, fallback: object) -> object:
         }
     return primary if has_text(primary) else fallback
 
+def primary_node_title(node: dict) -> str:
+    direct = str(node.get("title") or "").strip()
+    if direct:
+        return direct
+    for title in node.get("titles") or []:
+        if title.get("lang") == "en" and title.get("primary"):
+            return str(title.get("text") or "").strip()
+    return str(node.get("key") or "").strip()
+
+
+def load_schema(database_export: Path, schema_title: str) -> dict:
+    schema_path = database_export / "schemas" / f"{schema_title}.json"
+    if not schema_path.is_file():
+        raise FileNotFoundError(f"Schema not found for {schema_title}: {schema_path}")
+    payload = json.loads(schema_path.read_text(encoding="utf-8"))
+    return payload.get("schema") or payload
+
+
+def flatten_text_strings(value: object) -> list[str]:
+    values = []
+    if isinstance(value, str):
+        if value.strip():
+            values.append(value.strip())
+    elif isinstance(value, list):
+        for item in value:
+            values.extend(flatten_text_strings(item))
+    elif isinstance(value, dict):
+        for item in value.values():
+            values.extend(flatten_text_strings(item))
+    return values
+
+
+def count_dictionary_entries(value: object) -> int:
+    if isinstance(value, list):
+        return sum(count_dictionary_entries(item) for item in value)
+    if isinstance(value, dict):
+        if "headword" in value and "text" in value:
+            return 1
+        return sum(count_dictionary_entries(item) for item in value.values())
+    return 0
+
+
+def dictionary_headword(title: str, tref: object) -> str | None:
+    normalized = normalize_ref(tref)
+    prefix = normalize_ref(title) + ","
+    return normalized[len(prefix):].strip() if normalized.startswith(prefix) else None
+
+
+def download_dictionary_node(title: str, version_title: str, node: dict) -> list[dict]:
+    """Download a DictionaryNode through v3 text responses and their `next` refs."""
+    lexicon_name = str(node.get("lexiconName") or "").strip()
+    headword_map = node.get("headwordMap") or []
+    last_word = str(node.get("lastWord") or "").strip()
+    if not lexicon_name or not headword_map:
+        raise ValueError(f"Dictionary node for {title} lacks lexiconName/headwordMap")
+
+    starts = []
+    for item in headword_map:
+        if not isinstance(item, list) or len(item) < 2:
+            continue
+        headword = dictionary_headword(title, item[1]) or str(item[0]).strip()
+        if headword and headword not in starts:
+            starts.append(headword)
+    if not starts:
+        raise ValueError(f"Dictionary node for {title} has no usable headword ranges")
+
+    def download_chain(bounds: tuple[str, str | None]) -> list[dict]:
+        current, exclusive_end = bounds
+        chain_start = current
+        entries = []
+        seen = set()
+        while current and current != exclusive_end:
+            if current in seen:
+                raise ValueError(f"Dictionary entry loop at {title}, {current}")
+            seen.add(current)
+            tref = f"{title}, {current}"
+            # Dictionary content is stored as LexiconEntry data, not as a
+            # normal Version. Sefaria exposes it through the virtual primary
+            # version; asking for its displayed versionTitle returns no text.
+            response = fetch_json(
+                f"/api/v3/texts/{urllib.parse.quote(tref, safe='')}",
+                {"version": "primary"},
+            )
+            if not isinstance(response, dict) or response.get("error"):
+                error = response.get("error") if isinstance(response, dict) else "invalid response"
+                raise ValueError(f"No dictionary payload returned for {tref}: {error}")
+            versions = response.get("versions") or []
+            version = next(
+                (candidate for candidate in versions if candidate.get("language") == "he"),
+                None,
+            )
+            if version is None:
+                raise ValueError(
+                    f"No primary Hebrew dictionary text was returned for {tref} "
+                    f"(reported version: {version_title!r})"
+                )
+            rendered = "<br>".join(flatten_text_strings(version.get("text")))
+            canonical_headword = dictionary_headword(title, response.get("ref")) or current
+            if rendered:
+                entries.append({"headword": canonical_headword, "text": rendered})
+                if len(entries) % 100 == 0:
+                    print(
+                        f"Downloaded {len(entries)} dictionary entries for {title} "
+                        f"from {chain_start}; current={canonical_headword}",
+                        flush=True,
+                    )
+            if not exclusive_end and (canonical_headword == last_word or current == last_word):
+                break
+            next_ref = response.get("next")
+            next_word = dictionary_headword(title, next_ref)
+            if not next_word:
+                if exclusive_end:
+                    raise ValueError(f"Dictionary chain ended before {exclusive_end} at {current}")
+                break
+            current = next_word
+        return entries
+
+    bounds = [
+        (start, starts[index + 1] if index + 1 < len(starts) else None)
+        for index, start in enumerate(starts)
+    ]
+    entries = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(bounds))) as executor:
+        for chain in executor.map(download_chain, bounds):
+            entries.extend(chain)
+    deduplicated = []
+    seen_headwords = set()
+    for entry in entries:
+        headword = entry["headword"]
+        if headword not in seen_headwords:
+            seen_headwords.add(headword)
+            deduplicated.append(entry)
+    if not deduplicated:
+        raise ValueError(f"No dictionary entries downloaded for {title} ({lexicon_name})")
+    return deduplicated
+
+def download_complex_version(title: str, version_title: str, schema: dict) -> dict:
+    leaves = []
+
+    def collect(node: dict, ref_parts: list[str], output_keys: list[str]) -> None:
+        node_title = primary_node_title(node)
+        is_default = str(node.get("key") or "").lower() == "default" or node.get("default") is True
+        next_ref_parts = ref_parts if is_default or not node_title else ref_parts + [node_title]
+        output_key = "" if is_default else node_title
+        next_output_keys = output_keys + [output_key]
+        children = node.get("nodes") or []
+        if children:
+            for child in children:
+                collect(child, next_ref_parts, next_output_keys)
+        else:
+            leaves.append((node, next_ref_parts, next_output_keys))
+
+    for child in schema.get("nodes") or []:
+        collect(child, [], [])
+    if not leaves:
+        raise ValueError(f"Complex schema for {title} contains no leaf nodes")
+
+    def fetch_leaf(leaf: tuple[dict, list[str], list[str]]) -> tuple[list[str], object]:
+        node, ref_parts, output_keys = leaf
+        if node.get("nodeType") == "DictionaryNode":
+            return output_keys, download_dictionary_node(title, version_title, node)
+        tref = ", ".join([title] + ref_parts)
+        response = fetch_json(
+            "/api/texts/{}/he/{}".format(
+                urllib.parse.quote(tref, safe=""),
+                urllib.parse.quote(version_title, safe=""),
+            ),
+            {
+                "context": "0",
+                "commentary": "0",
+                "pad": "0",
+                "alts": "0",
+                "fallbackOnDefaultVersion": "0",
+            },
+        )
+        if not isinstance(response, dict) or "he" not in response or response.get("error"):
+            error = response.get("error") if isinstance(response, dict) else "invalid response"
+            raise ValueError(f"No Hebrew payload returned for leaf {tref}: {error}")
+        return output_keys, response.get("he")
+
+    result = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        for output_keys, leaf_text in executor.map(fetch_leaf, leaves):
+            current = result
+            for key in output_keys[:-1]:
+                current = current.setdefault(key, {})
+            current[output_keys[-1]] = leaf_text
+    return result
+
 def download_title(item: dict, database_export: Path, direct_links: list[dict]) -> dict:
     schema_title = safe_schema_title(item.get("schemaTitle"))
     title = str(item.get("title") or "").strip()
@@ -233,31 +535,40 @@ def download_title(item: dict, database_export: Path, direct_links: list[dict]) 
         raise ValueError("Missing verified Hebrew title or version")
 
     text = None
+    schema = load_schema(database_export, schema_title)
     downloaded_versions = []
+    downloaded_dictionary_entries = 0
     for version in versions:
         version_title = str(version.get("versionTitle") or "").strip()
         if not version_title:
             raise ValueError(f"Missing Hebrew version title for {he_title}")
-        text_path = "/api/texts/{}/he/{}".format(
-            urllib.parse.quote(title, safe=""),
-            urllib.parse.quote(version_title, safe=""),
-        )
-        text_response = fetch_json(
-            text_path,
-            {
-                "context": "0",
-                "commentary": "0",
-                "pad": "0",
-                "alts": "0",
-                "fallbackOnDefaultVersion": "0",
-            },
-        )
-        version_text = text_response.get("he") if isinstance(text_response, dict) else None
+        if schema.get("nodes"):
+            version_text = download_complex_version(title, version_title, schema)
+        else:
+            text_path = "/api/texts/{}/he/{}".format(
+                urllib.parse.quote(title, safe=""),
+                urllib.parse.quote(version_title, safe=""),
+            )
+            text_response = fetch_json(
+                text_path,
+                {
+                    "context": "0",
+                    "commentary": "0",
+                    "pad": "0",
+                    "alts": "0",
+                    "fallbackOnDefaultVersion": "0",
+                },
+            )
+            version_text = text_response.get("he") if isinstance(text_response, dict) else None
         if not has_text(version_text):
             raise ValueError(f"No Hebrew text returned for {he_title}: {version_title}")
+        downloaded_dictionary_entries = max(
+            downloaded_dictionary_entries,
+            count_dictionary_entries(version_text),
+        )
         text = version_text if text is None else merge_text(text, version_text)
         downloaded_versions.append(version_title)
-    merged_path = database_export / "json" / "__copyright_api__" / schema_title / "merged.json"
+    merged_path = database_export / "json" / "__supplemental_api__" / schema_title / "merged.json"
     merged_path.parent.mkdir(parents=True, exist_ok=True)
     merged_path.write_text(
         json.dumps(
@@ -276,14 +587,16 @@ def download_title(item: dict, database_export: Path, direct_links: list[dict]) 
         encoding="utf-8",
     )
 
-    links = download_links(direct_links)
+    links, link_errors = download_links(direct_links)
 
     return {
         "schemaTitle": schema_title,
         "heTitle": he_title,
         "mergedPath": str(merged_path.resolve()),
         "downloadedVersions": len(downloaded_versions),
+        "downloadedDictionaryEntries": downloaded_dictionary_entries,
         "links": links,
+        "linkErrors": link_errors,
     }
 
 
@@ -294,13 +607,34 @@ def main() -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--links", required=True, type=Path)
     parser.add_argument("--status", required=True, type=Path)
+    parser.add_argument(
+        "--books-blacklist",
+        type=Path,
+        default=Path("generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt"),
+    )
+    parser.add_argument(
+        "--authors-blacklist",
+        type=Path,
+        default=Path("generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt"),
+    )
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
 
     items = json.loads(args.report.read_text(encoding="utf-8"))
     if not isinstance(items, list):
-        raise ValueError("Copyright report must contain a JSON array")
+        raise ValueError("Supplemental Hebrew report must contain a JSON array")
     database_export = find_database_export(args.export_root)
+    requested_count = len(items)
+    items, blacklisted_items = prefilter_blacklisted_items(
+        items,
+        database_export,
+        args.books_blacklist,
+        args.authors_blacklist,
+    )
+    if blacklisted_items:
+        print(f"Filtered {len(blacklisted_items)} supplemental Hebrew titles by blacklist before API download")
+        for blocked in blacklisted_items:
+            print(f"  - {blocked.get('heTitle')} ({', '.join(blocked['reasons'])})")
     direct_links_by_title = scan_direct_links(
         database_export,
         [str(item.get("title") or "") for item in items],
@@ -323,12 +657,25 @@ def main() -> int:
             try:
                 completed.append(future.result())
             except Exception as error:
-                errors.append({"heTitle": item.get("heTitle"), "error": str(error)})
+                failure = {
+                    "schemaTitle": item.get("schemaTitle"),
+                    "title": item.get("title"),
+                    "heTitle": item.get("heTitle"),
+                    "errorType": type(error).__name__,
+                    "error": str(error),
+                }
+                errors.append(failure)
+                print(f"::warning::{failure['heTitle']}: {failure['error']}", flush=True)
             if count % 10 == 0 or count == len(items):
-                print(f"Downloaded {count}/{len(items)} copyright titles; errors={len(errors)}", flush=True)
+                print(f"Processed {count}/{len(items)} supplemental Hebrew titles; errors={len(errors)}", flush=True)
 
     completed.sort(key=lambda item: item["heTitle"])
     all_links = [link for item in completed for link in item["links"]]
+    link_errors = [
+        {"heTitle": item["heTitle"], **error}
+        for item in completed
+        for error in item["linkErrors"]
+    ]
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     args.manifest.write_text(
         "".join(item["mergedPath"] + "\n" for item in completed),
@@ -338,11 +685,30 @@ def main() -> int:
     args.status.write_text(
         json.dumps(
             {
-                "requestedBooks": len(items),
+                "downloadOutcome": (
+                    "failed" if not completed else "partial" if errors or link_errors else "complete"
+                ),
+                "requestedBooks": requested_count,
+                "eligibleAfterBlacklist": len(items),
+                "blacklistedBeforeDownload": blacklisted_items,
                 "downloadedBooks": len(completed),
                 "downloadedHebrewVersions": sum(item["downloadedVersions"] for item in completed),
+                "downloadedDictionaryEntries": sum(item["downloadedDictionaryEntries"] for item in completed),
                 "directBulkLinks": sum(len(links) for links in direct_links_by_title.values()),
                 "downloadedApiLinks": len(all_links),
+                "unresolvedDirectLinks": len(link_errors),
+                "completedBooks": [
+                    {
+                        "schemaTitle": item["schemaTitle"],
+                        "heTitle": item["heTitle"],
+                        "downloadedVersions": item["downloadedVersions"],
+                        "downloadedDictionaryEntries": item["downloadedDictionaryEntries"],
+                        "resolvedLinks": len(item["links"]),
+                        "unresolvedLinks": len(item["linkErrors"]),
+                    }
+                    for item in completed
+                ],
+                "linkErrors": link_errors,
                 "errors": errors,
             },
             ensure_ascii=False,
@@ -351,11 +717,21 @@ def main() -> int:
         + "\n",
         encoding="utf-8",
     )
+    if link_errors:
+        print(f"::warning::{len(link_errors)} direct links could not be resolved after v1 and v3 fallbacks")
+        for error in link_errors:
+            anchor = error.get("anchorRef") or error.get("sectionRef")
+            print(
+                f"::warning::{error.get('heTitle')}: {anchor} -> "
+                f"{error.get('sourceRef', '')}: {error.get('error')}"
+            )
     if errors:
-        print(f"::error::{len(errors)} copyright books or link sets could not be downloaded")
-        return 1
+        print(
+            f"::warning::{len(errors)} supplemental Hebrew books could not be downloaded; "
+            f"continuing with {len(completed)} successfully downloaded books"
+        )
     if not completed:
-        print("::error::No Hebrew copyright books were downloaded")
+        print("::error::No supplemental Hebrew books were downloaded")
         return 1
     return 0
 

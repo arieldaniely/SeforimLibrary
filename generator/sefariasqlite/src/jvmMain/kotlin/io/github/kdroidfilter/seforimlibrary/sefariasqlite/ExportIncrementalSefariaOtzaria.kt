@@ -100,8 +100,17 @@ fun main() = runBlocking {
 
     SefariaImageEmbedder.prefetch(mergedFiles, logger = logger)
     val candidates = reader.readBooksInParallel(mergedFiles, schemaDir, schemaLookup)
+    // An explicit merged-files manifest (used by the Copyright API export)
+    // bypasses selectMergedFiles' schema-level seed filter. Filter the parsed
+    // payloads as well, using their authoritative Hebrew/English titles, so the
+    // ZIP and the missing-books importer agree on what is actually new.
+    val seedFilteredCandidates = filterPayloadsAlreadyInSeed(candidates, existingTitleKeys)
+    val skippedParsedAlreadyInSeed = candidates.size - seedFilteredCandidates.size
+    if (skippedParsedAlreadyInSeed > 0) {
+        logger.i { "Skipped $skippedParsedAlreadyInSeed parsed books already present in the seed DB" }
+    }
     val filtered = filterBlacklistedPayloads(
-        payloads = candidates,
+        payloads = seedFilteredCandidates,
         blacklists = if (ignoreBlacklists) SefariaBlacklists.Empty else
             loadSefariaBlacklists(SefariaOtzariaExporter::class.java.classLoader, logger),
     )
@@ -129,7 +138,11 @@ fun main() = runBlocking {
         schemasWithoutMergedExamples = selection.schemasWithoutMergedExamples,
         schemasWithoutMergedTitles = selection.schemasWithoutMergedTitles,
         mergedBooksInSource = selection.discoveredCount,
-        skippedAlreadyInSeed = selection.excludedExistingTitleCount,
+        skippedAlreadyInSeed = if (mergedFilesList == null) {
+            selection.excludedExistingTitleCount + skippedParsedAlreadyInSeed
+        } else {
+            skippedParsedAlreadyInSeed
+        },
         selectedForParsing = mergedFiles.size,
         parsedSuccessfully = candidates.size,
         skippedParseFailure = mergedFiles.size - candidates.size,
@@ -363,6 +376,18 @@ private data class OtzariaLink(
     @SerialName("line_index_2") val lineIndex2: Int,
     @SerialName("Conection Type") val connectionType: String,
 )
+
+internal fun filterPayloadsAlreadyInSeed(
+    payloads: List<BookPayload>,
+    existingTitleKeys: Set<String>,
+): List<BookPayload> {
+    if (existingTitleKeys.isEmpty()) return payloads
+    return payloads.filterNot { payload ->
+        sequenceOf(payload.heTitle, payload.enTitle)
+            .mapNotNull(::normalizeTitleKey)
+            .any(existingTitleKeys::contains)
+    }
+}
 
 internal fun sanitizeOtzariaFileName(name: String): String = name
     .replace("\"", "")

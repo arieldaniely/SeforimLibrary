@@ -143,12 +143,12 @@ jobs:
           test -s build/incremental-sefaria-otzaria.zip
           unzip -t build/incremental-sefaria-otzaria.zip
 
-      - name: Build Hebrew copyright exclusion report
+      - name: Build missing Hebrew books report
         run: |
           python3 .github/scripts/build-sefaria-copyright-report.py \
             --input build/incremental-sefaria-report.json \
-            --output build/copyright-only-titles.json \
-            --status build/copyright-report-status.json \
+            --output build/supplemental-hebrew-titles.json \
+            --status build/supplemental-report-status.json \
             --workers 8
 
       - name: Inject missing Sefaria books
@@ -166,6 +166,7 @@ jobs:
             :otzariasqlite:generateHavroutaLinks \
             -PseforimDb="$PWD/build/seforim.db" \
             -PnewBookIdsFile="$PWD/build/otzaria-new-book-ids.txt" \
+            -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
             -PinMemoryDb=false \
             -PgeneratorHeap=5g \
             --no-daemon --stacktrace
@@ -189,6 +190,43 @@ jobs:
             | grep -Fvx -f seed-book-ids.txt > new-book-ids.txt
           NEW_BOOKS=$(wc -l < new-book-ids.txt)
           test "$NEW_BOOKS" -gt 0
+          NEW_IDS_JSON=$(jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)' new-book-ids.txt)
+          sqlite3 -json build/seforim.db "
+            WITH RECURSIVE category_paths(id, path) AS (
+              SELECT id, title FROM category WHERE parentId IS NULL
+              UNION ALL
+              SELECT c.id, category_paths.path || ' › ' || c.title
+              FROM category c JOIN category_paths ON c.parentId = category_paths.id
+            )
+            SELECT b.id,
+                   b.title,
+                   COALESCE(b.heRef, '') AS heRef,
+                   s.name AS source,
+                   COALESCE(cp.path, c.title) AS categoryPath,
+                   COALESCE(GROUP_CONCAT(DISTINCT a.name), '') AS authors,
+                   b.totalLines,
+                   (SELECT COUNT(*) FROM link l WHERE l.sourceBookId = b.id) AS outboundLinks,
+                   (SELECT COUNT(*) FROM link l WHERE l.targetBookId = b.id) AS inboundLinks
+            FROM book b
+            JOIN source s ON s.id = b.sourceId
+            JOIN category c ON c.id = b.categoryId
+            LEFT JOIN category_paths cp ON cp.id = c.id
+            LEFT JOIN book_author ba ON ba.bookId = b.id
+            LEFT JOIN author a ON a.id = ba.authorId
+            WHERE b.id IN (SELECT value FROM json_each('$NEW_IDS_JSON'))
+            GROUP BY b.id
+            ORDER BY s.name, categoryPath, b.title;
+          " > build/injected-books.json
+          test "$(jq 'length' build/injected-books.json)" -eq "$NEW_BOOKS"
+          jq -n \
+            --arg integrity "ok" \
+            --argjson seedBooks '${{ steps.seed_counts.outputs.books }}' \
+            --argjson finalBooks "$AFTER_BOOKS" \
+            --argjson seedLines '${{ steps.seed_counts.outputs.lines }}' \
+            --argjson finalLines "$AFTER_LINES" \
+            --argjson addedBooks "$NEW_BOOKS" \
+            '{integrityCheck: $integrity, foreignKeyErrors: 0, seedBooks: $seedBooks, finalBooks: $finalBooks, addedBooks: $addedBooks, seedLines: $seedLines, finalLines: $finalLines, addedLines: ($finalLines - $seedLines)}' \
+            > build/injection-validation.json
           echo "Books to add to Lucene: $NEW_BOOKS"
           echo "Injected counts: books=$AFTER_BOOKS lines=$AFTER_LINES"
 
@@ -272,6 +310,23 @@ jobs:
             git push origin HEAD:master
           fi
 
+      - name: Upload full injection diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: incremental-injection-${{ steps.versions.outputs.release_tag }}-diagnostics
+          path: |
+            build/incremental-sefaria-report.json
+            build/supplemental-hebrew-titles.json
+            build/supplemental-report-status.json
+            build/injected-books.json
+            build/injection-validation.json
+            build/otzaria-new-book-ids.txt
+            new-book-ids.txt
+            seed-source-counts.json
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Write injection summary
         if: ${{ always() }}
         shell: bash
@@ -282,4 +337,11 @@ jobs:
           bash .github/scripts/write-incremental-summary.sh \
             build/seforim.db \
             seed-source-counts.json \
-            build/incremental-sefaria-report.json
+            build/incremental-sefaria-report.json \
+            build/supplemental-hebrew-titles.json \
+            build/supplemental-report-status.json \
+            build/injected-books.json \
+            build/injection-validation.json \
+            '${{ steps.versions.outputs.seed_tag }}' \
+            '${{ steps.versions.outputs.release_tag }}' \
+            '${{ inputs.prerelease }}'

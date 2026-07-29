@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Identify Hebrew copyright-only titles omitted from a Sefaria bulk export."""
+"""Identify Hebrew titles omitted from a Sefaria bulk export and classify their licenses."""
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
 import json
+from collections import Counter
 import sys
 import time
 import urllib.error
@@ -48,14 +49,11 @@ def inspect_title(schema_title: str):
         for version in hebrew_versions
         if str(version.get("license") or "").startswith("Copyright")
     ]
-    # A title is classified as copyright-only only when it has Hebrew versions
-    # and every current Hebrew version carries the Copyright marker.
     if not hebrew_versions:
         return None, False
-    if len(copyright_versions) != len(hebrew_versions):
-        return None, True
+    copyright_only = len(copyright_versions) == len(hebrew_versions)
 
-    normalized_title = str(copyright_versions[0].get("title") or schema_title.replace("_", " "))
+    normalized_title = str(hebrew_versions[0].get("title") or schema_title.replace("_", " "))
     try:
         index = fetch_json(f"/api/v2/raw/index/{urllib.parse.quote(normalized_title, safe='')}")
     except Exception:
@@ -80,6 +78,7 @@ def inspect_title(schema_title: str):
         "title": normalized_title,
         "heTitle": hebrew_title,
         "categories": index.get("categories") or [],
+        "copyrightOnly": copyright_only,
         "versions": [
             {
                 "versionTitle": version.get("versionTitle"),
@@ -89,7 +88,7 @@ def inspect_title(schema_title: str):
                 "license": version.get("license"),
                 "versionSource": version.get("versionSource"),
             }
-            for version in copyright_versions
+            for version in hebrew_versions
         ],
     }, True
 
@@ -123,11 +122,23 @@ def main() -> int:
             if completed % 100 == 0 or completed == len(candidates):
                 print(
                     f"Checked {completed}/{len(candidates)} missing Hebrew exports; "
-                    f"copyright={len(results)} errors={len(errors)}",
+                    f"supplemental={len(results)} errors={len(errors)}",
                     flush=True,
                 )
 
     results.sort(key=lambda item: (item.get("heTitle") or item["title"], item["title"]))
+    copyright_results = [item for item in results if item["copyrightOnly"]]
+    non_copyright_results = [item for item in results if not item["copyrightOnly"]]
+    licenses = Counter(
+        str(version.get("license") or "לא צוין")
+        for item in results
+        for version in item["versions"]
+    )
+    categories = Counter(
+        str(category)
+        for item in results
+        for category in item.get("categories") or []
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     args.status.write_text(
@@ -137,8 +148,15 @@ def main() -> int:
                 "checkedTitles": len(candidates) - len(errors),
                 "hebrewTitlesChecked": hebrew_titles_checked,
                 "requestErrors": len(errors),
-                "copyrightTitles": len(results),
-                "copyrightHebrewVersions": sum(len(item["versions"]) for item in results),
+                "supplementalHebrewTitles": len(results),
+                "supplementalHebrewVersions": sum(len(item["versions"]) for item in results),
+                "copyrightTitles": len(copyright_results),
+                "copyrightHebrewVersions": sum(len(item["versions"]) for item in copyright_results),
+                "nonCopyrightHebrewTitles": len(non_copyright_results),
+                "nonCopyrightTitles": [item["heTitle"] for item in non_copyright_results],
+                "licenseBreakdown": dict(sorted(licenses.items())),
+                "categoryBreakdown": dict(sorted(categories.items())),
+                "errors": sorted(errors, key=lambda item: item["title"]),
             },
             ensure_ascii=False,
             indent=2,
