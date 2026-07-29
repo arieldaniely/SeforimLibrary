@@ -53,6 +53,24 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     // and exist before any link references them, so a read-through cache is safe during import.
     private val bookOrderIndexCache = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
+    private fun <T> queryEachLinkPartition(query: () -> T): List<T> =
+        (driver as? LinkPartitionQueryDriver)?.queryEachLinkPartition(query) ?: listOf(query())
+
+    private fun <T> queryAllLinkPartitions(query: () -> List<T>): List<T> =
+        queryEachLinkPartition(query).flatten()
+
+    private fun <T> queryAllLinkPartitionsForTargetLines(
+        targetLineIds: Collection<Long>,
+        query: () -> List<T>,
+    ): List<T> =
+        (driver as? LinkPartitionQueryDriver)
+            ?.queryEachLinkPartitionForTargetLines(targetLineIds, query)
+            ?.flatten()
+            ?: query()
+
+    fun hasAdditionalLinksTargetingBook(bookId: Long): Boolean =
+        (driver as? LinkPartitionQueryDriver)?.hasAdditionalLinksTargetingBook(bookId) == true
+
     private fun resolveBookOrderIndex(bookId: Long): Long =
         bookOrderIndexCache.getOrPut(bookId) {
             database.bookQueriesQueries.selectOrderIndexById(bookId).executeAsOneOrNull() ?: 0L
@@ -485,13 +503,14 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     }
 
     /**
-     * Lightweight helper for commentary flows: loads core book data and publication
-     * dates without joining authors, topics, or publication places.
+     * Lightweight helper for commentary flows: loads core book data, authors and publication
+     * dates without the unrelated topic and publication-place queries.
      */
     suspend fun getBookWithPubDates(id: Long): Book? = withContext(Dispatchers.IO) {
         val bookData = database.bookQueriesQueries.selectById(id).executeAsOneOrNull() ?: return@withContext null
+        val authors = getBookAuthors(bookData.id)
         val pubDates = getBookPubDates(bookData.id)
-        return@withContext bookData.toModel(json, pubDates = pubDates)
+        return@withContext bookData.toModel(json, authors = authors, pubDates = pubDates)
     }
 
     /**
@@ -1644,7 +1663,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 )
             }
         if (!includeSources) return@withContext forward
-        val inverse = database.linkQueriesQueries.selectInverseLinksByTargetLineIds(lineIds).executeAsList()
+        val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
+            database.linkQueriesQueries.selectInverseLinksByTargetLineIds(lineIds).executeAsList()
+        }
             .filter { activeCommentatorIds.isEmpty() || it.targetBookId in activeCommentatorIds }
             .map {
                 CommentaryWithText(
@@ -1692,7 +1713,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 )
             }
         if (!includeSources) return@withContext forward
-        val inverse = database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(lineIds).executeAsList()
+        val inverse = queryAllLinkPartitionsForTargetLines(lineIds) {
+            database.linkQueriesQueries.selectInverseLinkSummariesByTargetLineIds(lineIds).executeAsList()
+        }
             .filter { activeCommentatorIds.isEmpty() || it.targetBookId in activeCommentatorIds }
             .map {
                 CommentarySummary(
@@ -1723,6 +1746,28 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     )
                 }
         }
+
+    /** Resolves commentary navigation without materializing a page of commentary text. */
+    suspend fun getFirstCommentaryTargetLineId(
+        sourceLineIds: List<Long>,
+        commentatorBookId: Long,
+    ): Long? = withContext(Dispatchers.IO) {
+        if (sourceLineIds.isEmpty()) return@withContext null
+        database.linkQueriesQueries
+            .selectFirstTargetLineIdBySourceLinesAndBook(sourceLineIds, commentatorBookId)
+            .executeAsOneOrNull()
+    }
+
+    /** Resolves inverse/source navigation without loading the linked content. */
+    suspend fun getFirstSourceTargetLineId(
+        targetLineIds: List<Long>,
+        sourceBookId: Long,
+    ): Long? = withContext(Dispatchers.IO) {
+        if (targetLineIds.isEmpty()) return@withContext null
+        database.linkQueriesQueries
+            .selectFirstSourceLineIdByTargetLinesAndBook(targetLineIds, sourceBookId)
+            .executeAsOneOrNull()
+    }
 
     // New paginated methods for per-commentator pagination use cases
     suspend fun getCommentariesForLineRange(
@@ -1860,6 +1905,103 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         distinctBySourceLine: Boolean,
     ): List<CommentaryWithText> {
         val useDistinct = distinctBySourceLine && lineIds.size > 1
+        if (driver is LinkPartitionQueryDriver) {
+            // A UNION-view inverse JOIN makes SQLite materialize both databases before it can
+            // use targetLineId. Query each physical link partition through its native indexes.
+            // Fetch only the prefix needed for this page, then page the small merged result.
+            val pageWindow = (offset.toLong() + limit.toLong()).coerceAtLeast(0L)
+            val rows =
+                queryAllLinkPartitionsForTargetLines(lineIds) {
+                    when {
+                        activeSourceBookIds.isEmpty() && useDistinct ->
+                            database.linkQueriesQueries.selectInverseLinksByTargetLineIdsPagedDistinct(
+                                lineIds,
+                                pageWindow,
+                                0L,
+                            ).executeAsList().map {
+                                CommentaryWithText(
+                                    link = Link(
+                                        id = it.id ?: 0L,
+                                        sourceBookId = it.sourceBookId,
+                                        targetBookId = it.targetBookId ?: 0L,
+                                        sourceLineId = it.sourceLineId ?: 0L,
+                                        targetLineId = it.targetLineId,
+                                        targetLineIndex = (it.targetLineIndex ?: 0L).toInt(),
+                                        connectionType = ConnectionType.SOURCE,
+                                    ),
+                                    targetBookTitle = it.targetBookTitle,
+                                    targetText = it.targetText,
+                                )
+                            }
+
+                        activeSourceBookIds.isEmpty() ->
+                            database.linkQueriesQueries.selectInverseLinksByTargetLineIdsPaged(
+                                lineIds,
+                                pageWindow,
+                                0L,
+                            ).executeAsList().map {
+                                CommentaryWithText(
+                                    link = Link(
+                                        id = it.id,
+                                        sourceBookId = it.sourceBookId,
+                                        targetBookId = it.targetBookId,
+                                        sourceLineId = it.sourceLineId,
+                                        targetLineId = it.targetLineId,
+                                        targetLineIndex = it.targetLineIndex.toInt(),
+                                        connectionType = ConnectionType.SOURCE,
+                                    ),
+                                    targetBookTitle = it.targetBookTitle,
+                                    targetText = it.targetText,
+                                )
+                            }
+
+                        useDistinct ->
+                            database.linkQueriesQueries.selectInverseLinksByTargetLineIdsAndSourcesPagedDistinct(
+                                lineIds,
+                                activeSourceBookIds.toList(),
+                                pageWindow,
+                                0L,
+                            ).executeAsList().map {
+                                CommentaryWithText(
+                                    link = Link(
+                                        id = it.id ?: 0L,
+                                        sourceBookId = it.sourceBookId,
+                                        targetBookId = it.targetBookId ?: 0L,
+                                        sourceLineId = it.sourceLineId ?: 0L,
+                                        targetLineId = it.targetLineId,
+                                        targetLineIndex = (it.targetLineIndex ?: 0L).toInt(),
+                                        connectionType = ConnectionType.SOURCE,
+                                    ),
+                                    targetBookTitle = it.targetBookTitle,
+                                    targetText = it.targetText,
+                                )
+                            }
+
+                        else ->
+                            database.linkQueriesQueries.selectInverseLinksByTargetLineIdsAndSourcesPaged(
+                                lineIds,
+                                activeSourceBookIds.toList(),
+                                pageWindow,
+                                0L,
+                            ).executeAsList().map {
+                                CommentaryWithText(
+                                    link = Link(
+                                        id = it.id,
+                                        sourceBookId = it.sourceBookId,
+                                        targetBookId = it.targetBookId,
+                                        sourceLineId = it.sourceLineId,
+                                        targetLineId = it.targetLineId,
+                                        targetLineIndex = it.targetLineIndex.toInt(),
+                                        connectionType = ConnectionType.SOURCE,
+                                    ),
+                                    targetBookTitle = it.targetBookTitle,
+                                    targetText = it.targetText,
+                                )
+                            }
+                    }
+                }
+            return rows.drop(offset).take(limit)
+        }
         return if (activeSourceBookIds.isEmpty()) {
             if (useDistinct) {
                 database.linkQueriesQueries.selectInverseLinksByTargetLineIdsPagedDistinct(
@@ -1969,16 +2111,20 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 "SOURCE cannot be mixed with other connection types in a single query"
             }
             val rows = if (activeCommentatorIds.isEmpty()) {
-                database.linkQueriesQueries
-                    .selectInverseLinkCharCountsByTargetLineIds(lineIds)
-                    .executeAsList()
+                queryAllLinkPartitionsForTargetLines(lineIds) {
+                    database.linkQueriesQueries
+                        .selectInverseLinkCharCountsByTargetLineIds(lineIds)
+                        .executeAsList()
+                }
             } else {
-                database.linkQueriesQueries
-                    .selectInverseLinkCharCountsByTargetLineIdsAndSources(
-                        lineIds,
-                        activeCommentatorIds.toList(),
-                    )
-                    .executeAsList()
+                queryAllLinkPartitionsForTargetLines(lineIds) {
+                    database.linkQueriesQueries
+                        .selectInverseLinkCharCountsByTargetLineIdsAndSources(
+                            lineIds,
+                            activeCommentatorIds.toList(),
+                        )
+                        .executeAsList()
+                }
             }
             return@withContext rows.map { it.toInt() }
         }
@@ -2279,7 +2425,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     }
 
     suspend fun countLinksByTargetBookAndType(bookId: Long, typeName: String): Long = withContext(Dispatchers.IO) {
-        database.linkQueriesQueries.countLinksByTargetBookAndType(bookId, typeName).executeAsOne()
+        queryEachLinkPartition {
+            database.linkQueriesQueries.countLinksByTargetBookAndType(bookId, typeName).executeAsOne()
+        }.sum()
     }
 
     suspend fun updateBookConnectionFlags(
@@ -2533,7 +2681,10 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
      */
     suspend fun countLinksByTargetBook(bookId: Long): Long = withContext(Dispatchers.IO) {
         logger.d { "Counting links where book $bookId is the target" }
-        val count = database.linkQueriesQueries.countLinksByTargetBook(bookId).executeAsOne()
+        val count =
+            queryEachLinkPartition {
+                database.linkQueriesQueries.countLinksByTargetBook(bookId).executeAsOne()
+            }.sum()
         logger.d { "Found $count links where book $bookId is the target" }
         count
     }
