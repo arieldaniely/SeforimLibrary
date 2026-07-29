@@ -85,6 +85,8 @@ interface SearchEngine : Closeable {
      */
     fun buildSnippet(rawText: String, query: String, near: Int): String
 
+    fun buildHighlightTerms(query: String): List<String>
+
     /**
      * Returns the contiguous passage within [text] whose meaning is closest to [query],
      * for semantic highlighting (using the same dense encoder as semantic search).

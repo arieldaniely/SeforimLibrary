@@ -9,15 +9,15 @@ SELECT altTocEntryId FROM line_alt_toc WHERE lineId = ? AND structureId = ?;
 selectByStructure:
 SELECT lat.lineId, lat.structureId, lat.altTocEntryId
 FROM line_alt_toc lat
-JOIN line l ON l.id = lat.lineId
 WHERE lat.structureId = ?
-ORDER BY l.lineIndex;
+ORDER BY (SELECT l.lineIndex FROM line l WHERE l.id = lat.lineId);
 
 selectLineIdsByAltTocEntry:
 SELECT l.id
 FROM line l
-JOIN line_alt_toc lat ON lat.lineId = l.id
-WHERE lat.altTocEntryId = ?
+WHERE l.id IN (
+    SELECT lat.lineId FROM line_alt_toc lat WHERE lat.altTocEntryId = ?
+)
 ORDER BY l.lineIndex;
 
 insert:

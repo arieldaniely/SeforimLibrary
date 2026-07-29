@@ -9,15 +9,17 @@ SELECT tocEntryId FROM line_toc WHERE lineId = ?;
 selectByBookId:
 SELECT lt.lineId, lt.tocEntryId
 FROM line_toc lt
-JOIN line l ON l.id = lt.lineId
-WHERE l.bookId = ?
-ORDER BY l.lineIndex;
+WHERE lt.lineId IN (
+    SELECT l.id FROM line l WHERE l.bookId = ?
+)
+ORDER BY (SELECT l.lineIndex FROM line l WHERE l.id = lt.lineId);
 
 selectLineIdsByTocEntryId:
 SELECT l.id
 FROM line l
-JOIN line_toc lt ON lt.lineId = l.id
-WHERE lt.tocEntryId = ?
+WHERE l.id IN (
+    SELECT lt.lineId FROM line_toc lt WHERE lt.tocEntryId = ?
+)
 ORDER BY l.lineIndex;
 
 insert:
