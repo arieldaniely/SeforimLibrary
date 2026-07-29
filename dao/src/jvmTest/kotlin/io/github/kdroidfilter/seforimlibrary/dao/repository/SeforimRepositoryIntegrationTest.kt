@@ -528,6 +528,51 @@ class SeforimRepositoryIntegrationTest {
 
     // ==================== Virtual SOURCE view tests ====================
 
+    @Test
+    fun `SOURCE and MENTION views separate inbound base links and outbound citation links`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val verseBookId = repository.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Verse", order = 1f, isBaseBook = true)
+        )
+        val gemaraBookId = repository.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Gemara", order = 2f, isBaseBook = false)
+        )
+        val verseLineId = repository.insertLine(Line(bookId = verseBookId, lineIndex = 0, content = "Verse text"))
+        val gemaraLineId = repository.insertLine(Line(bookId = gemaraBookId, lineIndex = 0, content = "Gemara quote"))
+
+        repository.insertLink(
+            Link(
+                sourceBookId = verseBookId,
+                targetBookId = gemaraBookId,
+                sourceLineId = verseLineId,
+                targetLineId = gemaraLineId,
+                targetLineIndex = 0,
+                connectionType = ConnectionType.REFERENCE,
+            )
+        )
+
+        // From Gemara line (target side), the Verse is a SOURCE.
+        val gemaraSources = repository.getSourceSummariesForLines(listOf(gemaraLineId))
+        assertEquals(1, gemaraSources.size)
+        assertEquals(verseBookId, gemaraSources.first().link.targetBookId)
+        assertEquals(ConnectionType.SOURCE, gemaraSources.first().link.connectionType)
+
+        // From Verse line (source side), the Gemara is a MENTION.
+        val verseMentions = repository.getMentionSummariesForLines(listOf(verseLineId))
+        assertEquals(1, verseMentions.size)
+        assertEquals(gemaraBookId, verseMentions.first().link.targetBookId)
+        assertEquals(ConnectionType.MENTION, verseMentions.first().link.connectionType)
+
+        // Verse has no sources in Gemara.
+        val verseSources = repository.getSourceSummariesForLines(listOf(verseLineId))
+        assertEquals(0, verseSources.size)
+
+        // Gemara has no mentions in Verse.
+        val gemaraMentions = repository.getMentionSummariesForLines(listOf(gemaraLineId))
+        assertEquals(0, gemaraMentions.size)
+    }
+
     // Validates the single-direction storage + virtual SOURCE view contract:
     // a stored COMMENTARY link base→dep MUST be visible both as a COMMENTARY
     // outgoing from the base line and as a SOURCE incoming to the dep line.
