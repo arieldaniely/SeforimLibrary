@@ -1,459 +1,469 @@
-name: Incremental Inject + Release
-
 # Resource-bounded release path:
-#   1. restore the latest published DB bundle,
-#   2. export currently-allowed, missing Sefaria books as an Otzaria ZIP,
-#   3. append those books to the DB and run the existing Otzaria phases,
-#   4. append the new books to Lucene and publish both DB and ZIP artifacts.
+
+# 1. restore the latest published DB bundle,
+
+# 2. export currently-allowed, missing Sefaria books as an Otzaria ZIP,
+
+# 3. append those books to the DB and run the existing Otzaria phases,
+
+# 4. append the new books to Lucene and publish both DB and ZIP artifacts.
 
 on:
-  workflow_dispatch:
-    inputs:
-      source_repository:
-        description: Repository that owns the seed database release
-        required: true
-        default: kdroidFilter/SeforimLibrary
-        type: string
-      source_tag:
-        description: Seed release tag (empty means latest stable release)
-        required: false
-        default: ""
-        type: string
-      prerelease:
-        description: Publish the rebuilt database as a pre-release
-        required: false
-        default: true
-        type: boolean
-      include_copyright_books:
-        description: Also inject supplemental Hebrew Sefaria books missing from the bulk export (including Copyright versions)
-        required: false
-        default: false
-        type: boolean
+workflow_dispatch:
+inputs:
+source_repository:
+description: Repository that owns the seed database release
+required: true
+default: kdroidFilter/SeforimLibrary
+type: string
+source_tag:
+description: Seed release tag (empty means latest stable release)
+required: false
+default: ""
+type: string
+prerelease:
+description: Publish the rebuilt database as a pre-release
+required: false
+default: true
+type: boolean
+draft:
+description: Publish the rebuilt database as a draft release
+required: false
+default: false
+type: boolean
+include_copyright_books:
+description: Also inject supplemental Hebrew Sefaria books missing from the bulk export (including Copyright versions)
+required: false
+default: false
+type: boolean
 
 permissions:
-  contents: write
+contents: write
 
 concurrency:
-  group: seforim-incremental-release
-  cancel-in-progress: false
+group: seforim-incremental-release
+cancel-in-progress: false
 
 jobs:
-  inject-and-release:
-    name: Restore DB, inject missing books, rebuild and release
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+inject-and-release:
+name: Restore DB, inject missing books, rebuild and release
+runs-on: ubuntu-latest
+timeout-minutes: 360
+env:
+GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+SEED_REPOSITORY: ${{ inputs.source_repository }}
+# Keep the Gradle process small; generators run in their own bounded JVMs.
+GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx1g -Dkotlin.compiler.execution.strategy=in-process
+
+```
+steps:
+  - name: Checkout SeforimLibrary
+    uses: actions/checkout@v4
+    with:
+      submodules: recursive
+
+  - name: Free runner disk space
+    uses: jlumbroso/free-disk-space@main
+    with:
+      tool-cache: true
+      android: true
+      dotnet: true
+      haskell: true
+      large-packages: true
+      docker-images: true
+      swap-storage: false
+
+  - name: Set up Java 25
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: "25"
+
+  - name: Set up Gradle
+    uses: gradle/actions/setup-gradle@v4
+
+  - name: Install database workflow tools
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y --no-install-recommends jq sqlite3 unzip zstd
+      chmod +x gradlew
+
+  - name: Resolve seed and new release versions
+    id: versions
+    run: |
+      set -euo pipefail
+      SEED_TAG='${{ inputs.source_tag }}'
+      if [ -z "$SEED_TAG" ]; then
+        SEED_TAG=$(gh release view --repo "$SEED_REPOSITORY" --json tagName --jq .tagName)
+      fi
+      if [[ "$SEED_TAG" =~ ^v([0-9]+)- ]]; then
+        SEED_VERSION="${BASH_REMATCH[1]}"
+      else
+        echo "::error::Seed tag '$SEED_TAG' does not match v<dbVersion>-<timestamp>."
+        exit 1
+      fi
+      NEXT_VERSION=$((SEED_VERSION + 1))
+      RELEASE_TAG="v${NEXT_VERSION}-$(date -u +'%Y%m%d%H%M%S')"
+      echo "seed_tag=$SEED_TAG" >> "$GITHUB_OUTPUT"
+      echo "seed_version=$SEED_VERSION" >> "$GITHUB_OUTPUT"
+      echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+      echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      echo "Seed: $SEED_REPOSITORY@$SEED_TAG (v$SEED_VERSION); output: $RELEASE_TAG"
+
+  - name: Download seed release database
+    run: |
+      set -euo pipefail
+      mkdir -p seed-assets seed-extract build
+      gh release download '${{ steps.versions.outputs.seed_tag }}' \
+        --repo "$SEED_REPOSITORY" \
+        --pattern 'seforim_bundle.tar.zst.part*' \
+        --pattern 'seforim.db.buildstate' \
+        --dir seed-assets
+      test -s seed-assets/seforim.db.buildstate
+      cat seed-assets/seforim_bundle.tar.zst.part* > seed-assets/seforim_bundle.tar.zst
+      tar --use-compress-program=unzstd -xf seed-assets/seforim_bundle.tar.zst -C seed-extract
+      test -s seed-extract/seforim.db
+      cp -a seed-extract/. build/
+      cp seed-assets/seforim.db.buildstate build/seforim.db.buildstate
+      rm -rf seed-extract seed-assets
+      echo "Restored seed database:"
+      ls -lh build/seforim.db build/seforim.db.buildstate
+      df -h /
+
+  - name: Record seed database counts
+    id: seed_counts
+    run: |
+      set -euo pipefail
+      BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
+      LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
+      sqlite3 build/seforim.db 'SELECT id FROM book ORDER BY id;' > seed-book-ids.txt
+      sqlite3 -json build/seforim.db \
+        'SELECT s.name AS source, COUNT(*) AS books FROM book b JOIN source s ON s.id=b.sourceId GROUP BY s.id, s.name ORDER BY s.name;' \
+        > seed-source-counts.json
+      echo "books=$BOOKS" >> "$GITHUB_OUTPUT"
+      echo "lines=$LINES" >> "$GITHUB_OUTPUT"
+      echo "Seed counts: books=$BOOKS lines=$LINES"
+
+  - name: Export missing Sefaria books as an Otzaria ZIP
+    id: otzaria_zip_export
+    continue-on-error: true
+    run: |
+      ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
+        -PseedDb="$PWD/build/seforim.db" \
+        -PotzariaOutputDir="$PWD/build/incremental-sefaria-otzaria" \
+        -PotzariaOutputZip="$PWD/build/incremental-sefaria-otzaria.zip" \
+        -PincrementalReport="$PWD/build/incremental-sefaria-report.json" \
+        -PgeneratorHeap=5g \
+        --no-daemon --stacktrace
+      test -s build/incremental-sefaria-otzaria.zip
+      unzip -t build/incremental-sefaria-otzaria.zip
+
+  - name: Build missing Hebrew books report
+    id: supplemental_report
+    if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' }}
+    run: |
+      python3 .github/scripts/build-sefaria-copyright-report.py \
+        --input build/incremental-sefaria-report.json \
+        --output build/supplemental-hebrew-titles.json \
+        --status build/supplemental-report-status.json \
+        --workers 8
+      echo "count=$(jq 'length' build/supplemental-hebrew-titles.json)" >> "$GITHUB_OUTPUT"
+
+  - name: Download supplemental Hebrew books and outbound links
+    if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
+    run: |
+      python3 .github/scripts/download-sefaria-copyright-export.py \
+        --report build/supplemental-hebrew-titles.json \
+        --export-root build/sefaria/export \
+        --manifest build/supplemental-merged-files.txt \
+        --links build/supplemental-api-links.json \
+        --status build/supplemental-download-status.json \
+        --books-blacklist generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt \
+        --authors-blacklist generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt \
+        --workers 2
+
+  - name: Export supplemental Hebrew books as an Otzaria ZIP
+    if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
+    run: |
+      ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
+        -PseedDb="$PWD/build/seforim.db" \
+        -PexportDir="$PWD/build/sefaria/export" \
+        -PmergedFilesList="$PWD/build/supplemental-merged-files.txt" \
+        -PapiLinksPath="$PWD/build/supplemental-api-links.json" \
+        -PreportSource="Sefaria API supplemental Hebrew versions" \
+        -PotzariaOutputDir="$PWD/build/supplemental-sefaria-otzaria" \
+        -PotzariaOutputZip="$PWD/build/supplemental-sefaria-otzaria.zip" \
+        -PincrementalReport="$PWD/build/supplemental-otzaria-report.json" \
+        -PgeneratorHeap=5g \
+        --no-daemon --stacktrace
+      test -s build/supplemental-sefaria-otzaria.zip
+      unzip -t build/supplemental-sefaria-otzaria.zip
+
+  - name: Inject missing Sefaria books
+    run: |
+      ./gradlew :sefariasqlite:appendMissingSefaria \
+        -PseforimDb="$PWD/build/seforim.db" \
+        -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
+        -PbuildVersion='${{ steps.versions.outputs.next_version }}' \
+        -PgeneratorHeap=5g \
+        --no-daemon --stacktrace
+
+  - name: Inject supplemental Sefaria books and links
+    if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
+    run: |
+      set -euo pipefail
+      EXPECTED=$(jq '.exportedBooks' build/supplemental-otzaria-report.json)
+      EXPECTED_LINKS=$(jq '.exportedLinks' build/supplemental-otzaria-report.json)
+      if [ "$EXPECTED" -eq 0 ]; then
+        echo "No supplemental books survived export filtering; skipping import."
+        exit 0
+      fi
+      BEFORE=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
+      ./gradlew :otzariasqlite:appendOtzaria \
+        -PseforimDb="$PWD/build/seforim.db" \
+        -PsourceDir="$PWD/build/supplemental-sefaria-otzaria" \
+        -PnewBookIdsFile="$PWD/build/supplemental-new-book-ids.txt" \
+        -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
+        -PinMemoryDb=false \
+        -PgeneratorHeap=5g \
+        --no-daemon --stacktrace
+      AFTER=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
+      ADDED=$((AFTER-BEFORE))
+      test "$ADDED" -eq "$EXPECTED" || {
+        echo "::error::Supplemental import added $ADDED books; expected $EXPECTED."
+        exit 1
+      }
+      IDS_CSV=$(awk '/^[0-9]+$/ { print }' build/supplemental-new-book-ids.txt | sort -nu | paste -sd, -)
+      IMPORTED_LINKS=0
+      CANONICAL_DEPENDANT_LINKS=0
+      REVERSED_DEPENDANT_LINKS=0
+      if [ -n "$IDS_CSV" ]; then
+        IMPORTED_LINKS=$(sqlite3 build/seforim.db \
+          "SELECT COUNT(*) FROM link WHERE sourceBookId IN ($IDS_CSV) OR targetBookId IN ($IDS_CSV);")
+        CANONICAL_DEPENDANT_LINKS=$(sqlite3 build/seforim.db \
+          "SELECT COUNT(*) FROM link l JOIN connection_type ct ON ct.id=l.connectionTypeId WHERE l.targetBookId IN ($IDS_CSV) AND l.sourceBookId NOT IN ($IDS_CSV) AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL');")
+        REVERSED_DEPENDANT_LINKS=$(sqlite3 build/seforim.db \
+          "SELECT COUNT(*) FROM link l JOIN connection_type ct ON ct.id=l.connectionTypeId WHERE l.sourceBookId IN ($IDS_CSV) AND l.targetBookId NOT IN ($IDS_CSV) AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL');")
+      fi
+      if [ "$EXPECTED_LINKS" -gt 0 ] && [ "$IMPORTED_LINKS" -eq 0 ]; then
+        echo "::error::Supplemental ZIP contains $EXPECTED_LINKS links but none reached the database."
+        exit 1
+      fi
+      if [ "$REVERSED_DEPENDANT_LINKS" -ne 0 ]; then
+        echo "::error::Found $REVERSED_DEPENDANT_LINKS supplemental dependant links stored as dependant->base."
+        exit 1
+      fi
+      jq -n \
+        --argjson expectedBooks "$EXPECTED" \
+        --argjson addedBooks "$ADDED" \
+        --argjson exportedLinks "$EXPECTED_LINKS" \
+        --argjson importedLinks "$IMPORTED_LINKS" \
+        --argjson canonicalDependantLinks "$CANONICAL_DEPENDANT_LINKS" \
+        --argjson reversedDependantLinks "$REVERSED_DEPENDANT_LINKS" \
+        '{verified: true, expectedBooks: $expectedBooks, addedBooks: $addedBooks, exportedLinks: $exportedLinks, importedLinks: $importedLinks, canonicalDependantLinks: $canonicalDependantLinks, reversedDependantLinks: $reversedDependantLinks}' \
+        > build/supplemental-import-validation.json
+
+  - name: Inject currently allowed Otzaria books and links
+    run: |
+      ./gradlew :otzariasqlite:appendOtzaria \
+        :otzariasqlite:generateHavroutaLinks \
+        -PseforimDb="$PWD/build/seforim.db" \
+        -PnewBookIdsFile="$PWD/build/otzaria-new-book-ids.txt" \
+        -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
+        -PinMemoryDb=false \
+        -PgeneratorHeap=5g \
+        --no-daemon --stacktrace
+
+  - name: Normalize categories and verify injected database
+    run: |
+      set -euo pipefail
+      ./gradlew :sefariasqlite:renameCategories \
+        -PseforimDb="$PWD/build/seforim.db" \
+        --no-daemon --stacktrace
+      DUPLICATE_CATEGORIES=$(sqlite3 build/seforim.db "SELECT COUNT(*) FROM (SELECT title, parentId FROM category GROUP BY title, parentId HAVING COUNT(*) > 1);")
+      if [ "$DUPLICATE_CATEGORIES" -ne 0 ]; then
+        echo "::error::Found $DUPLICATE_CATEGORIES duplicate sibling category groups after normalization."
+        exit 1
+      fi
+      AFTER_BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
+      AFTER_LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
+      if [ "$AFTER_BOOKS" -le '${{ steps.seed_counts.outputs.books }}' ]; then
+        echo "::error::No books were added (before=${{ steps.seed_counts.outputs.books }}, after=$AFTER_BOOKS)."
+        exit 1
+      fi
+      test "$(sqlite3 build/seforim.db 'PRAGMA integrity_check;')" = "ok"
+      FK_ERRORS=$(sqlite3 build/seforim.db 'PRAGMA foreign_key_check;' | head -n 1)
+      test -z "$FK_ERRORS" || { echo "::error::Foreign-key violation: $FK_ERRORS"; exit 1; }
+      sqlite3 build/seforim.db 'SELECT id FROM book ORDER BY id;' \
+        | grep -Fvx -f seed-book-ids.txt > new-book-ids.txt
+      NEW_BOOKS=$(wc -l < new-book-ids.txt)
+      test "$NEW_BOOKS" -gt 0
+      NEW_IDS_JSON=$(jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)' new-book-ids.txt)
+      sqlite3 -json build/seforim.db "
+        WITH RECURSIVE category_paths(id, path) AS (
+          SELECT id, title FROM category WHERE parentId IS NULL
+          UNION ALL
+          SELECT c.id, category_paths.path || ' › ' || c.title
+          FROM category c JOIN category_paths ON c.parentId = category_paths.id
+        )
+        SELECT b.id,
+               b.title,
+               COALESCE(b.heRef, '') AS heRef,
+               s.name AS source,
+               COALESCE(cp.path, c.title) AS categoryPath,
+               COALESCE(GROUP_CONCAT(DISTINCT a.name), '') AS authors,
+               b.totalLines,
+               (SELECT COUNT(*) FROM link l WHERE l.sourceBookId = b.id) AS outboundLinks,
+               (SELECT COUNT(*) FROM link l WHERE l.targetBookId = b.id) AS inboundLinks
+        FROM book b
+        JOIN source s ON s.id = b.sourceId
+        JOIN category c ON c.id = b.categoryId
+        LEFT JOIN category_paths cp ON cp.id = c.id
+        LEFT JOIN book_author ba ON ba.bookId = b.id
+        LEFT JOIN author a ON a.id = ba.authorId
+        WHERE b.id IN (SELECT value FROM json_each('$NEW_IDS_JSON'))
+        GROUP BY b.id
+        ORDER BY s.name, categoryPath, b.title;
+      " > build/injected-books.json
+      test "$(jq 'length' build/injected-books.json)" -eq "$NEW_BOOKS"
+      jq -n \
+        --arg integrity "ok" \
+        --argjson seedBooks '${{ steps.seed_counts.outputs.books }}' \
+        --argjson finalBooks "$AFTER_BOOKS" \
+        --argjson seedLines '${{ steps.seed_counts.outputs.lines }}' \
+        --argjson finalLines "$AFTER_LINES" \
+        --argjson addedBooks "$NEW_BOOKS" \
+        '{integrityCheck: $integrity, foreignKeyErrors: 0, seedBooks: $seedBooks, finalBooks: $finalBooks, addedBooks: $addedBooks, seedLines: $seedLines, finalLines: $finalLines, addedLines: ($finalLines - $seedLines)}' \
+        > build/injection-validation.json
+      echo "Books to add to Lucene: $NEW_BOOKS"
+      echo "Injected counts: books=$AFTER_BOOKS lines=$AFTER_LINES"
+
+  - name: Rebuild catalog and append new books to Lucene
+    run: |
+      set -euo pipefail
+      rm -f build/catalog.pb
+      ./gradlew :catalog:buildCatalog \
+        -PseforimDb="$PWD/build/seforim.db" \
+        --no-daemon --stacktrace
+      ./gradlew :searchindex:appendLuceneIndexDefault \
+        -PseforimDb="$PWD/build/seforim.db" \
+        -PbookIdsFile="$PWD/new-book-ids.txt" \
+        -PindexThreads=1 \
+        -PgeneratorHeap=2g \
+        --no-daemon --stacktrace
+
+  - name: Stamp version and write release metadata
+    run: |
+      ./gradlew :generator-common:stampSchemaVersion \
+        :packaging:writeReleaseInfo \
+        -PdbPath="$PWD/build/seforim.db" \
+        -PseforimDb="$PWD/build/seforim.db" \
+        -PdbVersion='${{ steps.versions.outputs.next_version }}' \
+        -PreleaseName='${{ steps.versions.outputs.release_tag }}' \
+        --no-daemon --stacktrace
+
+  - name: Package updated database bundle
+    run: |
+      ./gradlew :packaging:packageArtifacts \
+        -PseforimDb="$PWD/build/seforim.db" \
+        -PbundleOutput="$PWD/build/package/seforim_bundle.tar.zst" \
+        -PzstdWorkers=1 \
+        -PsplitPartBytes=2147483647 \
+        --no-daemon --stacktrace
+
+  - name: Stage and validate release assets
+    run: |
+      set -euo pipefail
+      mkdir -p release-staging
+      cp build/package/seforim_bundle.tar.zst.part* release-staging/
+      cp build/seforim.db.buildstate release-staging/
+      cp build/catalog.pb release-staging/
+      if [ -s build/incremental-sefaria-otzaria.zip ]; then
+        cp build/incremental-sefaria-otzaria.zip \
+          "release-staging/sefaria-otzaria-${{ steps.versions.outputs.release_tag }}.zip"
+      else
+        echo "::warning::The optional Otzaria ZIP was not created; publishing the database release without it."
+      fi
+      if [ -s build/supplemental-sefaria-otzaria.zip ]; then
+        cp build/supplemental-sefaria-otzaria.zip \
+          "release-staging/sefaria-supplemental-${{ steps.versions.outputs.release_tag }}.zip"
+      fi
+      test -n "$(find release-staging -maxdepth 1 -type f -print -quit)"
+      OVER=$(find release-staging -maxdepth 1 -type f -size +2147483647c -print)
+      test -z "$OVER" || { echo "::error::Release assets exceed GitHub's 2 GiB limit: $OVER"; exit 1; }
+      ls -lh release-staging
+
+  - name: Publish rebuilt database release
+    uses: softprops/action-gh-release@v2
+    with:
+      tag_name: ${{ steps.versions.outputs.release_tag }}
+      name: ${{ steps.versions.outputs.release_tag }}
+      prerelease: ${{ inputs.prerelease }}
+      draft: ${{ inputs.draft }}
+      generate_release_notes: true
+      files: release-staging/*
+
+  - name: Refresh release manifest on master
+    run: |
+      set -euo pipefail
+      if LATEST=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null); then
+        LATEST_ARGS=(--argjson latest "$LATEST")
+      else
+        LATEST_ARGS=(--argjson latest null)
+      fi
+      RELEASES=$(gh release list --json tagName,name,publishedAt --limit 100)
+      jq -n \
+        --arg generatedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+        "${LATEST_ARGS[@]}" \
+        --argjson releases "$RELEASES" \
+        '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
+        > release-manifest.json
+      git config user.name github-actions[bot]
+      git config user.email github-actions[bot]@users.noreply.github.com
+      git add release-manifest.json
+      if ! git diff --staged --quiet; then
+        git commit -m 'Update release manifest [skip ci]'
+        git pull --rebase origin master
+        git push origin HEAD:master
+      fi
+
+  - name: Upload full injection diagnostics
+    if: ${{ always() }}
+    uses: actions/upload-artifact@v4
+    with:
+      name: incremental-injection-${{ steps.versions.outputs.release_tag }}-diagnostics
+      path: |
+        build/incremental-sefaria-report.json
+        build/supplemental-hebrew-titles.json
+        build/supplemental-report-status.json
+        build/supplemental-download-status.json
+        build/supplemental-otzaria-report.json
+        build/supplemental-import-validation.json
+        build/supplemental-new-book-ids.txt
+        build/injected-books.json
+        build/injection-validation.json
+        build/otzaria-new-book-ids.txt
+        new-book-ids.txt
+        seed-source-counts.json
+      if-no-files-found: warn
+      retention-days: 30
+
+  - name: Write injection summary
+    if: ${{ always() }}
+    shell: bash
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      SEED_REPOSITORY: ${{ inputs.source_repository }}
-      # Keep the Gradle process small; generators run in their own bounded JVMs.
-      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx1g -Dkotlin.compiler.execution.strategy=in-process
-
-    steps:
-      - name: Checkout SeforimLibrary
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Free runner disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: false
-
-      - name: Set up Java 25
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "25"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Install database workflow tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends jq sqlite3 unzip zstd
-          chmod +x gradlew
-
-      - name: Resolve seed and new release versions
-        id: versions
-        run: |
-          set -euo pipefail
-          SEED_TAG='${{ inputs.source_tag }}'
-          if [ -z "$SEED_TAG" ]; then
-            SEED_TAG=$(gh release view --repo "$SEED_REPOSITORY" --json tagName --jq .tagName)
-          fi
-          if [[ "$SEED_TAG" =~ ^v([0-9]+)- ]]; then
-            SEED_VERSION="${BASH_REMATCH[1]}"
-          else
-            echo "::error::Seed tag '$SEED_TAG' does not match v<dbVersion>-<timestamp>."
-            exit 1
-          fi
-          NEXT_VERSION=$((SEED_VERSION + 1))
-          RELEASE_TAG="v${NEXT_VERSION}-$(date -u +'%Y%m%d%H%M%S')"
-          echo "seed_tag=$SEED_TAG" >> "$GITHUB_OUTPUT"
-          echo "seed_version=$SEED_VERSION" >> "$GITHUB_OUTPUT"
-          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "Seed: $SEED_REPOSITORY@$SEED_TAG (v$SEED_VERSION); output: $RELEASE_TAG"
-
-      - name: Download seed release database
-        run: |
-          set -euo pipefail
-          mkdir -p seed-assets seed-extract build
-          gh release download '${{ steps.versions.outputs.seed_tag }}' \
-            --repo "$SEED_REPOSITORY" \
-            --pattern 'seforim_bundle.tar.zst.part*' \
-            --pattern 'seforim.db.buildstate' \
-            --dir seed-assets
-          test -s seed-assets/seforim.db.buildstate
-          cat seed-assets/seforim_bundle.tar.zst.part* > seed-assets/seforim_bundle.tar.zst
-          tar --use-compress-program=unzstd -xf seed-assets/seforim_bundle.tar.zst -C seed-extract
-          test -s seed-extract/seforim.db
-          cp -a seed-extract/. build/
-          cp seed-assets/seforim.db.buildstate build/seforim.db.buildstate
-          rm -rf seed-extract seed-assets
-          echo "Restored seed database:"
-          ls -lh build/seforim.db build/seforim.db.buildstate
-          df -h /
-
-      - name: Record seed database counts
-        id: seed_counts
-        run: |
-          set -euo pipefail
-          BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
-          LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
-          sqlite3 build/seforim.db 'SELECT id FROM book ORDER BY id;' > seed-book-ids.txt
-          sqlite3 -json build/seforim.db \
-            'SELECT s.name AS source, COUNT(*) AS books FROM book b JOIN source s ON s.id=b.sourceId GROUP BY s.id, s.name ORDER BY s.name;' \
-            > seed-source-counts.json
-          echo "books=$BOOKS" >> "$GITHUB_OUTPUT"
-          echo "lines=$LINES" >> "$GITHUB_OUTPUT"
-          echo "Seed counts: books=$BOOKS lines=$LINES"
-
-      - name: Export missing Sefaria books as an Otzaria ZIP
-        id: otzaria_zip_export
-        continue-on-error: true
-        run: |
-          ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
-            -PseedDb="$PWD/build/seforim.db" \
-            -PotzariaOutputDir="$PWD/build/incremental-sefaria-otzaria" \
-            -PotzariaOutputZip="$PWD/build/incremental-sefaria-otzaria.zip" \
-            -PincrementalReport="$PWD/build/incremental-sefaria-report.json" \
-            -PgeneratorHeap=5g \
-            --no-daemon --stacktrace
-          test -s build/incremental-sefaria-otzaria.zip
-          unzip -t build/incremental-sefaria-otzaria.zip
-
-      - name: Build missing Hebrew books report
-        id: supplemental_report
-        if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' }}
-        run: |
-          python3 .github/scripts/build-sefaria-copyright-report.py \
-            --input build/incremental-sefaria-report.json \
-            --output build/supplemental-hebrew-titles.json \
-            --status build/supplemental-report-status.json \
-            --workers 8
-          echo "count=$(jq 'length' build/supplemental-hebrew-titles.json)" >> "$GITHUB_OUTPUT"
-
-      - name: Download supplemental Hebrew books and outbound links
-        if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
-        run: |
-          python3 .github/scripts/download-sefaria-copyright-export.py \
-            --report build/supplemental-hebrew-titles.json \
-            --export-root build/sefaria/export \
-            --manifest build/supplemental-merged-files.txt \
-            --links build/supplemental-api-links.json \
-            --status build/supplemental-download-status.json \
-            --books-blacklist generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt \
-            --authors-blacklist generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt \
-            --workers 2
-
-      - name: Export supplemental Hebrew books as an Otzaria ZIP
-        if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
-        run: |
-          ./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
-            -PseedDb="$PWD/build/seforim.db" \
-            -PexportDir="$PWD/build/sefaria/export" \
-            -PmergedFilesList="$PWD/build/supplemental-merged-files.txt" \
-            -PapiLinksPath="$PWD/build/supplemental-api-links.json" \
-            -PreportSource="Sefaria API supplemental Hebrew versions" \
-            -PotzariaOutputDir="$PWD/build/supplemental-sefaria-otzaria" \
-            -PotzariaOutputZip="$PWD/build/supplemental-sefaria-otzaria.zip" \
-            -PincrementalReport="$PWD/build/supplemental-otzaria-report.json" \
-            -PgeneratorHeap=5g \
-            --no-daemon --stacktrace
-          test -s build/supplemental-sefaria-otzaria.zip
-          unzip -t build/supplemental-sefaria-otzaria.zip
-
-      - name: Inject missing Sefaria books
-        run: |
-          ./gradlew :sefariasqlite:appendMissingSefaria \
-            -PseforimDb="$PWD/build/seforim.db" \
-            -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
-            -PbuildVersion='${{ steps.versions.outputs.next_version }}' \
-            -PgeneratorHeap=5g \
-            --no-daemon --stacktrace
-
-      - name: Inject supplemental Sefaria books and links
-        if: ${{ inputs.include_copyright_books && steps.otzaria_zip_export.outcome == 'success' && steps.supplemental_report.outputs.count != '0' }}
-        run: |
-          set -euo pipefail
-          EXPECTED=$(jq '.exportedBooks' build/supplemental-otzaria-report.json)
-          EXPECTED_LINKS=$(jq '.exportedLinks' build/supplemental-otzaria-report.json)
-          if [ "$EXPECTED" -eq 0 ]; then
-            echo "No supplemental books survived export filtering; skipping import."
-            exit 0
-          fi
-          BEFORE=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
-          ./gradlew :otzariasqlite:appendOtzaria \
-            -PseforimDb="$PWD/build/seforim.db" \
-            -PsourceDir="$PWD/build/supplemental-sefaria-otzaria" \
-            -PnewBookIdsFile="$PWD/build/supplemental-new-book-ids.txt" \
-            -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
-            -PinMemoryDb=false \
-            -PgeneratorHeap=5g \
-            --no-daemon --stacktrace
-          AFTER=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
-          ADDED=$((AFTER-BEFORE))
-          test "$ADDED" -eq "$EXPECTED" || {
-            echo "::error::Supplemental import added $ADDED books; expected $EXPECTED."
-            exit 1
-          }
-          IDS_CSV=$(awk '/^[0-9]+$/ { print }' build/supplemental-new-book-ids.txt | sort -nu | paste -sd, -)
-          IMPORTED_LINKS=0
-          CANONICAL_DEPENDANT_LINKS=0
-          REVERSED_DEPENDANT_LINKS=0
-          if [ -n "$IDS_CSV" ]; then
-            IMPORTED_LINKS=$(sqlite3 build/seforim.db \
-              "SELECT COUNT(*) FROM link WHERE sourceBookId IN ($IDS_CSV) OR targetBookId IN ($IDS_CSV);")
-            CANONICAL_DEPENDANT_LINKS=$(sqlite3 build/seforim.db \
-              "SELECT COUNT(*) FROM link l JOIN connection_type ct ON ct.id=l.connectionTypeId WHERE l.targetBookId IN ($IDS_CSV) AND l.sourceBookId NOT IN ($IDS_CSV) AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL');")
-            REVERSED_DEPENDANT_LINKS=$(sqlite3 build/seforim.db \
-              "SELECT COUNT(*) FROM link l JOIN connection_type ct ON ct.id=l.connectionTypeId WHERE l.sourceBookId IN ($IDS_CSV) AND l.targetBookId NOT IN ($IDS_CSV) AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL');")
-          fi
-          if [ "$EXPECTED_LINKS" -gt 0 ] && [ "$IMPORTED_LINKS" -eq 0 ]; then
-            echo "::error::Supplemental ZIP contains $EXPECTED_LINKS links but none reached the database."
-            exit 1
-          fi
-          if [ "$REVERSED_DEPENDANT_LINKS" -ne 0 ]; then
-            echo "::error::Found $REVERSED_DEPENDANT_LINKS supplemental dependant links stored as dependant->base."
-            exit 1
-          fi
-          jq -n \
-            --argjson expectedBooks "$EXPECTED" \
-            --argjson addedBooks "$ADDED" \
-            --argjson exportedLinks "$EXPECTED_LINKS" \
-            --argjson importedLinks "$IMPORTED_LINKS" \
-            --argjson canonicalDependantLinks "$CANONICAL_DEPENDANT_LINKS" \
-            --argjson reversedDependantLinks "$REVERSED_DEPENDANT_LINKS" \
-            '{verified: true, expectedBooks: $expectedBooks, addedBooks: $addedBooks, exportedLinks: $exportedLinks, importedLinks: $importedLinks, canonicalDependantLinks: $canonicalDependantLinks, reversedDependantLinks: $reversedDependantLinks}' \
-            > build/supplemental-import-validation.json
-
-      - name: Inject currently allowed Otzaria books and links
-        run: |
-          ./gradlew :otzariasqlite:appendOtzaria \
-            :otzariasqlite:generateHavroutaLinks \
-            -PseforimDb="$PWD/build/seforim.db" \
-            -PnewBookIdsFile="$PWD/build/otzaria-new-book-ids.txt" \
-            -PbuildStatePath="$PWD/build/seforim.db.buildstate" \
-            -PinMemoryDb=false \
-            -PgeneratorHeap=5g \
-            --no-daemon --stacktrace
-
-      - name: Normalize categories and verify injected database
-        run: |
-          set -euo pipefail
-          ./gradlew :sefariasqlite:renameCategories \
-            -PseforimDb="$PWD/build/seforim.db" \
-            --no-daemon --stacktrace
-          DUPLICATE_CATEGORIES=$(sqlite3 build/seforim.db "SELECT COUNT(*) FROM (SELECT title, parentId FROM category GROUP BY title, parentId HAVING COUNT(*) > 1);")
-          if [ "$DUPLICATE_CATEGORIES" -ne 0 ]; then
-            echo "::error::Found $DUPLICATE_CATEGORIES duplicate sibling category groups after normalization."
-            exit 1
-          fi
-          AFTER_BOOKS=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM book;')
-          AFTER_LINES=$(sqlite3 build/seforim.db 'SELECT COUNT(*) FROM line;')
-          if [ "$AFTER_BOOKS" -le '${{ steps.seed_counts.outputs.books }}' ]; then
-            echo "::error::No books were added (before=${{ steps.seed_counts.outputs.books }}, after=$AFTER_BOOKS)."
-            exit 1
-          fi
-          test "$(sqlite3 build/seforim.db 'PRAGMA integrity_check;')" = "ok"
-          FK_ERRORS=$(sqlite3 build/seforim.db 'PRAGMA foreign_key_check;' | head -n 1)
-          test -z "$FK_ERRORS" || { echo "::error::Foreign-key violation: $FK_ERRORS"; exit 1; }
-          sqlite3 build/seforim.db 'SELECT id FROM book ORDER BY id;' \
-            | grep -Fvx -f seed-book-ids.txt > new-book-ids.txt
-          NEW_BOOKS=$(wc -l < new-book-ids.txt)
-          test "$NEW_BOOKS" -gt 0
-          NEW_IDS_JSON=$(jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)' new-book-ids.txt)
-          sqlite3 -json build/seforim.db "
-            WITH RECURSIVE category_paths(id, path) AS (
-              SELECT id, title FROM category WHERE parentId IS NULL
-              UNION ALL
-              SELECT c.id, category_paths.path || ' › ' || c.title
-              FROM category c JOIN category_paths ON c.parentId = category_paths.id
-            )
-            SELECT b.id,
-                   b.title,
-                   COALESCE(b.heRef, '') AS heRef,
-                   s.name AS source,
-                   COALESCE(cp.path, c.title) AS categoryPath,
-                   COALESCE(GROUP_CONCAT(DISTINCT a.name), '') AS authors,
-                   b.totalLines,
-                   (SELECT COUNT(*) FROM link l WHERE l.sourceBookId = b.id) AS outboundLinks,
-                   (SELECT COUNT(*) FROM link l WHERE l.targetBookId = b.id) AS inboundLinks
-            FROM book b
-            JOIN source s ON s.id = b.sourceId
-            JOIN category c ON c.id = b.categoryId
-            LEFT JOIN category_paths cp ON cp.id = c.id
-            LEFT JOIN book_author ba ON ba.bookId = b.id
-            LEFT JOIN author a ON a.id = ba.authorId
-            WHERE b.id IN (SELECT value FROM json_each('$NEW_IDS_JSON'))
-            GROUP BY b.id
-            ORDER BY s.name, categoryPath, b.title;
-          " > build/injected-books.json
-          test "$(jq 'length' build/injected-books.json)" -eq "$NEW_BOOKS"
-          jq -n \
-            --arg integrity "ok" \
-            --argjson seedBooks '${{ steps.seed_counts.outputs.books }}' \
-            --argjson finalBooks "$AFTER_BOOKS" \
-            --argjson seedLines '${{ steps.seed_counts.outputs.lines }}' \
-            --argjson finalLines "$AFTER_LINES" \
-            --argjson addedBooks "$NEW_BOOKS" \
-            '{integrityCheck: $integrity, foreignKeyErrors: 0, seedBooks: $seedBooks, finalBooks: $finalBooks, addedBooks: $addedBooks, seedLines: $seedLines, finalLines: $finalLines, addedLines: ($finalLines - $seedLines)}' \
-            > build/injection-validation.json
-          echo "Books to add to Lucene: $NEW_BOOKS"
-          echo "Injected counts: books=$AFTER_BOOKS lines=$AFTER_LINES"
-
-      - name: Rebuild catalog and append new books to Lucene
-        run: |
-          set -euo pipefail
-          rm -f build/catalog.pb
-          ./gradlew :catalog:buildCatalog \
-            -PseforimDb="$PWD/build/seforim.db" \
-            --no-daemon --stacktrace
-          ./gradlew :searchindex:appendLuceneIndexDefault \
-            -PseforimDb="$PWD/build/seforim.db" \
-            -PbookIdsFile="$PWD/new-book-ids.txt" \
-            -PindexThreads=1 \
-            -PgeneratorHeap=2g \
-            --no-daemon --stacktrace
-
-      - name: Stamp version and write release metadata
-        run: |
-          ./gradlew :generator-common:stampSchemaVersion \
-            :packaging:writeReleaseInfo \
-            -PdbPath="$PWD/build/seforim.db" \
-            -PseforimDb="$PWD/build/seforim.db" \
-            -PdbVersion='${{ steps.versions.outputs.next_version }}' \
-            -PreleaseName='${{ steps.versions.outputs.release_tag }}' \
-            --no-daemon --stacktrace
-
-      - name: Package updated database bundle
-        run: |
-          ./gradlew :packaging:packageArtifacts \
-            -PseforimDb="$PWD/build/seforim.db" \
-            -PbundleOutput="$PWD/build/package/seforim_bundle.tar.zst" \
-            -PzstdWorkers=1 \
-            -PsplitPartBytes=2147483647 \
-            --no-daemon --stacktrace
-
-      - name: Stage and validate release assets
-        run: |
-          set -euo pipefail
-          mkdir -p release-staging
-          cp build/package/seforim_bundle.tar.zst.part* release-staging/
-          cp build/seforim.db.buildstate release-staging/
-          cp build/catalog.pb release-staging/
-          if [ -s build/incremental-sefaria-otzaria.zip ]; then
-            cp build/incremental-sefaria-otzaria.zip \
-              "release-staging/sefaria-otzaria-${{ steps.versions.outputs.release_tag }}.zip"
-          else
-            echo "::warning::The optional Otzaria ZIP was not created; publishing the database release without it."
-          fi
-          if [ -s build/supplemental-sefaria-otzaria.zip ]; then
-            cp build/supplemental-sefaria-otzaria.zip \
-              "release-staging/sefaria-supplemental-${{ steps.versions.outputs.release_tag }}.zip"
-          fi
-          test -n "$(find release-staging -maxdepth 1 -type f -print -quit)"
-          OVER=$(find release-staging -maxdepth 1 -type f -size +2147483647c -print)
-          test -z "$OVER" || { echo "::error::Release assets exceed GitHub's 2 GiB limit: $OVER"; exit 1; }
-          ls -lh release-staging
-
-      - name: Publish rebuilt database release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.versions.outputs.release_tag }}
-          name: ${{ steps.versions.outputs.release_tag }}
-          prerelease: ${{ inputs.prerelease }}
-          generate_release_notes: true
-          files: release-staging/*
-
-      - name: Refresh release manifest on master
-        run: |
-          set -euo pipefail
-          if LATEST=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null); then
-            LATEST_ARGS=(--argjson latest "$LATEST")
-          else
-            LATEST_ARGS=(--argjson latest null)
-          fi
-          RELEASES=$(gh release list --json tagName,name,publishedAt --limit 100)
-          jq -n \
-            --arg generatedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            "${LATEST_ARGS[@]}" \
-            --argjson releases "$RELEASES" \
-            '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
-            > release-manifest.json
-          git config user.name github-actions[bot]
-          git config user.email github-actions[bot]@users.noreply.github.com
-          git add release-manifest.json
-          if ! git diff --staged --quiet; then
-            git commit -m 'Update release manifest [skip ci]'
-            git pull --rebase origin master
-            git push origin HEAD:master
-          fi
-
-      - name: Upload full injection diagnostics
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: incremental-injection-${{ steps.versions.outputs.release_tag }}-diagnostics
-          path: |
-            build/incremental-sefaria-report.json
-            build/supplemental-hebrew-titles.json
-            build/supplemental-report-status.json
-            build/supplemental-download-status.json
-            build/supplemental-otzaria-report.json
-            build/supplemental-import-validation.json
-            build/supplemental-new-book-ids.txt
-            build/injected-books.json
-            build/injection-validation.json
-            build/otzaria-new-book-ids.txt
-            new-book-ids.txt
-            seed-source-counts.json
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Write injection summary
-        if: ${{ always() }}
-        shell: bash
-        env:
-          SEED_BOOKS: ${{ steps.seed_counts.outputs.books }}
-          SEED_LINES: ${{ steps.seed_counts.outputs.lines }}
-        run: |
-          bash .github/scripts/write-incremental-summary.sh \
-            build/seforim.db \
-            seed-source-counts.json \
-            build/incremental-sefaria-report.json \
-            build/supplemental-hebrew-titles.json \
-            build/supplemental-report-status.json \
-            build/injected-books.json \
-            build/injection-validation.json \
-            '${{ steps.versions.outputs.seed_tag }}' \
-            '${{ steps.versions.outputs.release_tag }}' \
-            '${{ inputs.prerelease }}'
+      SEED_BOOKS: ${{ steps.seed_counts.outputs.books }}
+      SEED_LINES: ${{ steps.seed_counts.outputs.lines }}
+    run: |
+      bash .github/scripts/write-incremental-summary.sh \
+        build/seforim.db \
+        seed-source-counts.json \
+        build/incremental-sefaria-report.json \
+        build/supplemental-hebrew-titles.json \
+        build/supplemental-report-status.json \
+        build/injected-books.json \
+        build/injection-validation.json \
+        '${{ steps.versions.outputs.seed_tag }}' \
+        '${{ steps.versions.outputs.release_tag }}' \
+        '${{ inputs.prerelease }}'
+```
