@@ -31,6 +31,12 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     // Lookup / atomic tables — no FK in.
     PatchTable("source",             listOf("id"),       updatable = true),
     PatchTable("author",             listOf("id"),       updatable = true),
+    PatchTable("author_alias",       listOf("authorId", "name"), updatable = true),
+    PatchTable(
+        "author_relation",
+        listOf("authorId", "targetSlug", "relationType", "isInverse"),
+        updatable = true,
+    ),
     PatchTable("topic",              listOf("id"),       updatable = true),
     PatchTable("pub_place",          listOf("id"),       updatable = true),
     PatchTable("pub_date",           listOf("id"),       updatable = true),

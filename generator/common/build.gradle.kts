@@ -3,10 +3,10 @@ plugins {
 }
 
 // Generator forked-JVM heap. Honors -PgeneratorHeap=… (CI lowers it on 16 GB runners).
-// Default 10g matches local workstation use; CI sets 5g via the workflow.
+// Bounded default suitable for free/small CI runners; override for workstations.
 val generatorHeap: String = (project.findProperty("generatorHeap") as String?)
     ?: System.getenv("SEFORIM_GENERATOR_HEAP")
-    ?: "10g"
+    ?: "3g"
 
 
 kotlin {

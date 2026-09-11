@@ -4,10 +4,16 @@ plugins {
 }
 
 // Generator forked-JVM heap. Honors -PgeneratorHeap=… (CI lowers it on 16 GB runners).
-// Default 10g matches local workstation use; CI sets 5g via the workflow.
+// Bounded default suitable for free/small CI runners; override for workstations.
 val generatorHeap: String = (project.findProperty("generatorHeap") as String?)
     ?: System.getenv("SEFORIM_GENERATOR_HEAP")
-    ?: "10g"
+    ?: "3g"
+
+tasks.withType<JavaExec>().configureEach {
+    listOf("lowResource", "buildStatePath").forEach { name ->
+        if (project.hasProperty(name)) systemProperty(name, project.property(name) as String)
+    }
+}
 
 
 kotlin {
@@ -90,11 +96,12 @@ tasks.register<JavaExec>("generateLines") {
         rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
     }
     val defaultAcronymDb = layout.buildDirectory.file("acronymizer/acronymizer.db").get().asFile.absolutePath
-    // In-memory DB generation enabled by default (override with -PinMemoryDb=false)
-    val inMemory = project.findProperty("inMemoryDb") != "false"
+    // Disk-backed by default so standalone generation is safe on small runners.
+    val inMemory = project.findProperty("inMemoryDb") == "true"
     val cliDbPath = if (inMemory) ":memory:" else defaultDbPath
     // arg0: DB path only; sourceDir omitted so Kotlin will auto-download Otzaria
     args(cliDbPath)
+    systemProperty("seforimDb", defaultDbPath)
 
     // Provide acronym DB via system property so Kotlin picks it up
     if (project.hasProperty("acronymDb")) {
@@ -148,10 +155,11 @@ tasks.register<JavaExec>("generateLinks") {
     } else {
         rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
     }
-    // In-memory DB generation enabled by default (override with -PinMemoryDb=false)
-    val inMemory = project.findProperty("inMemoryDb") != "false"
+    // Disk-backed by default so standalone generation is safe on small runners.
+    val inMemory = project.findProperty("inMemoryDb") == "true"
     val cliDbPath = if (inMemory) ":memory:" else defaultDbPath
     args(cliDbPath)
+    systemProperty("seforimDb", defaultDbPath)
 
     if (inMemory) {
         if (project.hasProperty("persistDb")) {
@@ -202,11 +210,18 @@ tasks.register<JavaExec>("appendOtzariaLines") {
     }
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
-    // Use in-memory DB for speed; seed from baseDb; persist to persistDb (can equal baseDb)
-    args(":memory:")
+    val inMemory = project.findProperty("inMemoryDb") == "true"
+    check(inMemory || persistDb == baseDb) {
+        "Disk-backed append requires persistDb to equal baseDb"
+    }
+    args(if (inMemory) ":memory:" else baseDb)
     systemProperty("appendExistingDb", "true")
+    systemProperty("seforimDb", baseDb)
     systemProperty("baseDb", baseDb)
     systemProperty("persistDb", persistDb)
+    if (inMemory) {
+        systemProperty("inMemoryDb", "true")
+    }
 
     val defaultAcronymDb = layout.buildDirectory.file("acronymizer/acronymizer.db").get().asFile.absolutePath
     if (project.hasProperty("acronymDb")) {
@@ -245,9 +260,14 @@ tasks.register<JavaExec>("appendOtzariaLinks") {
     }
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
-    args(":memory:")
+    val inMemory = project.findProperty("inMemoryDb") == "true"
+    args(if (inMemory) ":memory:" else persistDb)
+    systemProperty("seforimDb", persistDb)
     systemProperty("baseDb", persistDb)
     systemProperty("persistDb", persistDb)
+    if (inMemory) {
+        systemProperty("inMemoryDb", "true")
+    }
 
     if (project.hasProperty("sourceDir")) {
         systemProperty("sourceDir", project.property("sourceDir") as String)
@@ -286,10 +306,8 @@ tasks.register<JavaExec>("generateHavroutaLinks") {
     }
     args(defaultDbPath)
 
-    // Bumped from 4g → 10g: the IdAllocator now loads a fully populated
-    // id_lookup (author/topic/pub_place/pub_date/toc_text) on top of the
-    // existing book/line/tocEntry/link tables, and 4g started OOM-ing
-    // once tocText was properly tracked (113k+ entries).
+    // Havrouta uses deterministic hashed link IDs and no longer reloads the
+    // complete build-state, so the shared bounded heap is sufficient.
     jvmArgs = listOf(
         "-Xmx$generatorHeap",
         "-XX:+UseG1GC"

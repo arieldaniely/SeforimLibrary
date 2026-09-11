@@ -3,10 +3,10 @@ plugins {
 }
 
 // Generator forked-JVM heap. Honors -PgeneratorHeap=… (CI lowers it on 16 GB runners).
-// Default 10g matches local workstation use; CI sets 5g via the workflow.
+// Bounded default suitable for free/small CI runners; override for workstations.
 val generatorHeap: String = (project.findProperty("generatorHeap") as String?)
     ?: System.getenv("SEFORIM_GENERATOR_HEAP")
-    ?: "10g"
+    ?: "3g"
 
 
 kotlin {
@@ -58,8 +58,8 @@ tasks.register<JavaExec>("buildLuceneIndexDefault") {
         systemProperty("seforimDb", defaultDbPath)
     }
 
-    // Prefer in-memory DB for faster reads (override with -PinMemoryDb=false)
-    val inMemory = project.findProperty("inMemoryDb") != "false"
+    // Disk-backed by default; copying a multi-gigabyte DB into native memory can OOM CI.
+    val inMemory = project.findProperty("inMemoryDb") == "true"
     if (inMemory) {
         systemProperty("inMemoryDb", "true")
     }

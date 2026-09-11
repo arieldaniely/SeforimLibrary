@@ -58,11 +58,14 @@ class SefariaDirectImporter(
             logger.i { "Source-hash classification: ${classification.summary()}" }
         }
 
-        // Parse table of contents for ordering
-        val (categoryOrders, bookOrders) = parseTableOfContentsOrders(dbRoot, json, logger)
+        val tocMetadata = parseTableOfContentsMetadata(dbRoot, json, logger)
+        val categoryOrders = tocMetadata.categoryOrders
+        val bookOrders = tocMetadata.bookOrders
+        val categoryDescriptions = tocMetadata.categoryDescriptions
         require(jsonDir.isDirectory() && schemaDir.isDirectory()) { "Missing json/schemas under $dbRoot" }
 
-        val bookPayloadReader = SefariaBookPayloadReader(json, logger)
+        val authorCatalog = SefariaAuthorCatalog.load(dbRoot, json, logger)
+        val bookPayloadReader = SefariaBookPayloadReader(json, logger, authorCatalog)
         val schemaLookup = bookPayloadReader.buildSchemaLookup(schemaDir)
 
         // Pre-download every `textimages.sefaria.org` asset and cache as base64
@@ -70,18 +73,8 @@ class SefariaDirectImporter(
         // Without this, books like Tikkunei Zohar render broken ❌ placeholders
         // (issue 392). This scan reads all merged.json once; the embedder uses
         // a disk cache under build/sefaria/image-cache so re-runs skip network.
-        val mergedFiles = java.nio.file.Files.walk(jsonDir).use { stream ->
-            stream.filter {
-                java.nio.file.Files.isRegularFile(it) &&
-                    it.fileName.toString().equals("merged.json", ignoreCase = true)
-            }.toList()
-        }
+        val mergedFiles = bookPayloadReader.listMergedFiles(jsonDir)
         SefariaImageEmbedder.prefetch(mergedFiles, logger = logger)
-
-        // Read and parse files in parallel
-        logger.i { "Starting parallel file processing..." }
-        val bookPayloads = bookPayloadReader.readBooksInParallel(jsonDir, schemaDir, schemaLookup)
-        logger.i { "Parsed ${bookPayloads.size} books" }
 
         val classLoader = javaClass.classLoader
         val blacklists = loadSefariaBlacklists(classLoader, logger)
@@ -91,26 +84,7 @@ class SefariaDirectImporter(
                     "bookTitles=${blacklists.bookTitleKeys.size}, bookPaths=${blacklists.bookPathKeys.size}"
             }
         }
-        val blacklistResult = filterBlacklistedPayloads(bookPayloads, blacklists)
-        if (blacklistResult.skippedTotal > 0) {
-            logger.i {
-                "Skipped ${blacklistResult.skippedTotal} books by blacklist " +
-                    "(books=${blacklistResult.skippedByBook}, authors=${blacklistResult.skippedByAuthor})"
-            }
-            if (blacklistResult.skippedBookExamples.isNotEmpty()) {
-                logger.i { "Book blacklist examples: ${blacklistResult.skippedBookExamples}" }
-            }
-            if (blacklistResult.skippedAuthorExamples.isNotEmpty()) {
-                logger.i { "Author blacklist examples: ${blacklistResult.skippedAuthorExamples}" }
-            }
-        }
-
         val priorityEntries = loadPriorityList(classLoader, logger)
-        val (orderedBookPayloads, missingPriorityEntriesRaw) =
-            applyPriorityOrdering(blacklistResult.payloads, priorityEntries)
-        val (blacklistedPriorityEntries, missingPriorityEntries) = missingPriorityEntriesRaw.partition {
-            normalizePriorityEntry(it) in blacklistResult.skippedNormalizedPaths
-        }
         val baseBookKeys = priorityEntries.toSet()
         val priorityIndexByPath = buildMap {
             priorityEntries.forEachIndexed { index, entry ->
@@ -125,26 +99,34 @@ class SefariaDirectImporter(
         val defaultCommentatorsConfig = loadDefaultCommentatorsConfig(classLoader, json, logger)
         val defaultTargumConfig = loadDefaultTargumConfig(classLoader, json, logger)
 
-        if (priorityEntries.isNotEmpty()) {
-            val matched = priorityEntries.size - missingPriorityEntriesRaw.size
-            logger.i { "Applied priority ordering for $matched/${priorityEntries.size} entries" }
-            if (blacklistedPriorityEntries.isNotEmpty()) {
-                logger.i { "Priority entries skipped by blacklist (first 5): ${blacklistedPriorityEntries.take(5)}" }
-            }
-            if (missingPriorityEntries.isNotEmpty()) {
-                logger.w {
-                    "Priority entries not found in Sefaria export (first 5): ${missingPriorityEntries.take(5)}"
-                }
-            }
+        val lowResource = (System.getProperty("lowResource")
+            ?: System.getenv("SEFORIM_LOW_RESOURCE")
+            ?: "true").toBoolean()
+        val totalBookCandidates = mergedFiles.size
+        val orderedBookPayloads: Iterable<BookPayload>
+        val filterDuringImport: Boolean
+        if (lowResource) {
+            logger.i { "Low-resource mode: parsing and persisting one book at a time ($totalBookCandidates candidates)" }
+            orderedBookPayloads = bookPayloadReader.readBooksSequentially(mergedFiles, schemaDir, schemaLookup).asIterable()
+            filterDuringImport = true
+            repository.executeRawQuery("PRAGMA journal_mode = WAL")
+            repository.executeRawQuery("PRAGMA synchronous = NORMAL")
+            repository.executeRawQuery("PRAGMA temp_store = FILE")
+            repository.executeRawQuery("PRAGMA cache_size = -32768")
+        } else {
+            logger.i { "Fast mode: parsing books in parallel" }
+            val parsed = bookPayloadReader.readBooksInParallel(jsonDir, schemaDir, schemaLookup)
+            val blacklistResult = filterBlacklistedPayloads(parsed, blacklists)
+            orderedBookPayloads = applyPriorityOrdering(blacklistResult.payloads, priorityEntries).first
+            filterDuringImport = false
+            repository.executeRawQuery("PRAGMA synchronous = OFF")
+            repository.executeRawQuery("PRAGMA journal_mode = MEMORY")
+            repository.executeRawQuery("PRAGMA cache_size = -64000")
         }
-
-        // Disable synchronous writes during bulk import
-        repository.executeRawQuery("PRAGMA synchronous = OFF")
-        repository.executeRawQuery("PRAGMA journal_mode = MEMORY")
-        repository.executeRawQuery("PRAGMA cache_size = -64000") // 64MB cache
 
         // Build DB entries (ids driven by IdAllocator for cross-build stability)
         val sourceId = bindings.upsertSource(sourceName)
+        authorCatalog.persist(repository, bindings)
         val categoryIds = ConcurrentHashMap<String, Long>()
         val categoryLevelsById = ConcurrentHashMap<Long, Int>()
 
@@ -161,12 +143,15 @@ class SefariaDirectImporter(
                     return@forEachIndexed
                 }
                 val categoryOrder = categoryOrders[key] ?: categoryOrders[part] ?: 999
+                val descriptions = categoryDescriptions[key]
                 val id = bindings.upsertCategory(
                     canonicalPath = key,
                     parentId = parentId,
                     title = part,
                     level = idx,
                     orderIndex = categoryOrder,
+                    heShortDesc = descriptions?.heShortDesc,
+                    heDesc = descriptions?.heDesc,
                 )
                 categoryIds[key] = id
                 categoryLevelsById[id] = idx
@@ -207,8 +192,14 @@ class SefariaDirectImporter(
 
         logger.i { "Inserting books and lines..." }
         var processedBooks = 0
+        var skippedBooks = 0
+        val matchedPriorityKeys = mutableSetOf<String>()
 
         for (payload in orderedBookPayloads) {
+            if (filterDuringImport && filterBlacklistedPayloads(listOf(payload), blacklists).payloads.isEmpty()) {
+                skippedBooks++
+                continue
+            }
             val catId = ensureCategoryPath(payload.categoriesHe)
             val bookId = allocator.bookId(sourceName, canonicalHeTitle(payload))
             val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
@@ -216,6 +207,7 @@ class SefariaDirectImporter(
                 ?: bookOrders[payload.heTitle]
                 ?: bookOrders[sanitizeFolder(payload.heTitle)])?.toFloat() ?: 999f
             val normalizedPath = normalizedBookPath(payload.categoriesHe, payload.heTitle)
+            if (normalizedPath in baseBookKeys) matchedPriorityKeys += normalizedPath
             val isBaseBook = normalizedPath in baseBookKeys
 
             // Detect teamim and nekudot in book lines
@@ -243,7 +235,8 @@ class SefariaDirectImporter(
                 authors = resolvedAuthors,
                 pubPlaces = emptyList(),
                 pubDates = resolvedPubDates,
-                heShortDesc = payload.description,
+                heShortDesc = payload.heShortDesc,
+                heDesc = payload.description,
                 notesContent = null,
                 order = bookOrder,
                 topics = emptyList(),
@@ -351,8 +344,14 @@ class SefariaDirectImporter(
 
             processedBooks++
             if (processedBooks % 100 == 0) {
-                logger.i { "Processed $processedBooks/${orderedBookPayloads.size} books" }
+                logger.i { "Processed $processedBooks/$totalBookCandidates books (skipped=$skippedBooks)" }
             }
+        }
+
+        if (priorityEntries.isNotEmpty()) {
+            val missing = baseBookKeys - matchedPriorityKeys
+            logger.i { "Matched ${matchedPriorityKeys.size}/${priorityEntries.size} priority entries" }
+            if (missing.isNotEmpty()) logger.w { "Priority entries not found (first 5): ${missing.take(5)}" }
         }
 
         // Flush remaining lines

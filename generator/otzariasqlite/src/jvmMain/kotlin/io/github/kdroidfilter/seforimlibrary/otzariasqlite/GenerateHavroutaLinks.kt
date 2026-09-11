@@ -4,7 +4,7 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
-import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.ids.HashedLinkIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -13,7 +13,6 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
-import java.nio.file.Path
 import java.nio.file.Paths
 
 /**
@@ -42,13 +41,13 @@ fun main(args: Array<String>) = runBlocking {
         ?: System.getenv("OTZARIA_SOURCE_DIR")
         ?: OtzariaFetcher.ensureLocalSource(logger).toString()
 
-    // ─── IdAllocator (delta-update support) ────────────────────────────────────
-    val buildStatePath: Path = run {
-        val explicit = System.getProperty("buildStatePath") ?: System.getenv("BUILD_STATE_PATH")
-        if (explicit != null) Paths.get(explicit) else Paths.get("$dbPath.buildstate")
+    // Havrouta links use a deterministic negative id namespace. This keeps them
+    // stable without loading the multi-gigabyte build_state (lines + Sefaria
+    // links) into memory a second time merely to allocate a small local subset.
+    val connectionTypeIds = ConnectionType.values().associate { type ->
+        type.name to repository.getOrCreateConnectionType(type.name)
     }
-    val prev = buildStatePath.takeIf { java.nio.file.Files.exists(it) }
-    val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
+    val allocator = HashedLinkIdAllocator(connectionTypeIds)
     val bindings = IdAllocatorBindings(allocator, repository)
     // Pre-register every connection type so link ids resolve deterministically.
     ConnectionType.values().forEach { bindings.upsertConnectionType(it.name) }
@@ -83,17 +82,6 @@ fun main(args: Array<String>) = runBlocking {
         repository.executeRawQuery("PRAGMA synchronous = NORMAL")
         repository.executeRawQuery("PRAGMA journal_mode = WAL")
 
-        // Persist build_state so subsequent runs preserve link ids.
-        runCatching {
-            allocator.snapshotTo(
-                target = buildStatePath,
-                extraMeta = mapOf(
-                    "generator" to "havroutalinks",
-                    "generated_at" to java.time.Instant.now().toString(),
-                ),
-            )
-        }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
-        Unit
     } catch (e: Exception) {
         logger.e(e) { "Error generating Havrouta links" }
         throw e

@@ -36,6 +36,8 @@ class SefariaBookPayloadReaderTest {
         assertEquals(2, siman.level)
         assertTrue(payload.lines.any { it == "<h3>סימן א</h3>" })
         assertTrue(payload.lines.none { it == "<h4>סימן א</h4>" })
+        assertEquals("תיאור קצר", payload.heShortDesc)
+        assertEquals("תיאור מלא של הספר", payload.description)
     }
 
     companion object {
@@ -43,6 +45,8 @@ class SefariaBookPayloadReaderTest {
             {
               "title": "Tur",
               "heTitle": "טור",
+              "heShortDesc": "תיאור קצר",
+              "heDesc": "תיאור מלא של הספר",
               "schema": {
                 "title": "Tur",
                 "heTitle": "טור",

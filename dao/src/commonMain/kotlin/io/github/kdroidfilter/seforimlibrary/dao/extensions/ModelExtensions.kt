@@ -35,7 +35,19 @@ private val logger = Logger.withTag("ModelExtensions")
 fun io.github.kdroidfilter.seforimlibrary.db.Author.toModel(): Author {
     return Author(
         id = id,
-        name = name
+        name = name,
+        sefariaSlug = sefariaSlug,
+        heBio = heBio,
+        birthYear = birthYear?.toInt(),
+        birthYearIsApprox = birthYearIsApprox == 1L,
+        deathYear = deathYear?.toInt(),
+        deathYearIsApprox = deathYearIsApprox == 1L,
+        era = era,
+        eraName = eraName,
+        birthPlace = birthPlace,
+        deathPlace = deathPlace,
+        heWikiLink = heWikiLink,
+        heNliLink = heNliLink,
     )
 }
 
@@ -84,6 +96,7 @@ fun io.github.kdroidfilter.seforimlibrary.db.Book.toModel(json: Json, authors: L
         pubPlaces = pubPlaces,
         pubDates = pubDates,
         heShortDesc = heShortDesc,
+        heDesc = heDesc,
         notesContent = notesContent,
         order = orderIndex.toFloat(),
         totalLines = totalLines.toInt(),
@@ -119,7 +132,10 @@ fun io.github.kdroidfilter.seforimlibrary.db.Category.toModel(): Category {
         id = id,
         parentId = parentId,
         title = title,
-        level = level.toInt()
+        level = level.toInt(),
+        order = orderIndex.toInt(),
+        heShortDesc = heShortDesc,
+        heDesc = heDesc,
     )
 }
 

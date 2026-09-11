@@ -10,9 +10,41 @@ Lucene indexes and `catalog.pb` are built as separate steps (see `:searchindex:b
 - Converts hierarchical JSON texts to flattened SQLite lines
 - Generates bidirectional citation links between texts
 - Builds hierarchical table of contents with parent-child relationships
-- Preserves Hebrew/English metadata, authors, publication dates
+- Imports Hebrew short/long book and category descriptions
+- Imports Hebrew author names, aliases, biographies, life ranges, periods, places, and relationships
 - Supports complex schemas with Talmud pagination, Gematria numbering
+- Uses resumable, disk-backed, one-book-at-a-time processing by default
+- Publishes the output only after the DB and stable-ID snapshot are complete
 - Leaves catalog/index generation to dedicated modules
+
+## Low-resource and resumable operation
+
+The default mode is intended for small CI runners: SQLite stays on disk, books are parsed and committed
+incrementally, stable-ID lookups use a second disk-backed SQLite database instead of retaining millions of
+natural keys in the JVM heap, temporary SQLite data stays on disk, and file parsing is bounded. A failed run
+leaves the previously published database untouched; the next run replaces any incomplete `.building` candidates.
+
+Useful overrides:
+
+```shell
+./gradlew :sefariasqlite:generateSefariaSqlite \
+  -PseforimDb=/path/to/seforim.db \
+  -PlowResource=true \
+  -PfileParallelism=2 \
+  -PauthorMetadataMode=api \
+  -PauthorMetadataCache=/persistent/cache/authors
+```
+
+- `lowResource=true` (default) parses and persists one book at a time. Set it to `false` only on a
+  well-provisioned machine.
+- `fileParallelism` bounds concurrent file parsing in the fast path (default `2`).
+- `authorMetadataMode=api` enriches the exported `authors.json` from Sefaria Topics, caching one response
+  per slug so interrupted builds resume without repeating completed downloads. Use `file` for a fully
+  offline enriched export, or `off` to skip author metadata.
+- `authorMetadataCache` should point to persistent storage in CI when possible.
+
+The `Manual Generate + Pre-Release` workflow also accepts a `draft` input. A draft uploads all assets but
+does not refresh the public release manifest until the draft is published.
 
 ## Source Structure (Sefaria Export)
 
@@ -20,6 +52,7 @@ Lucene indexes and `catalog.pb` are built as separate steps (see `:searchindex:b
 ```
 database_export/
 ├── table_of_contents.json          # Category and book ordering metadata
+├── authors.json                    # Author slugs/titles and optional Topic metadata
 ├── json/                            # Book content files
 │   └── {BookName}/
 │       └── merged.json              # Complete text content
@@ -128,7 +161,8 @@ CREATE TABLE book (
     title TEXT NOT NULL,            -- Hebrew title
     authors TEXT,                   -- JSON-serialized Author[]
     pubDates TEXT,                  -- JSON-serialized PubDate[]
-    heShortDesc TEXT,               -- Hebrew description
+    heShortDesc TEXT,               -- Short Hebrew description
+    heDesc TEXT,                    -- Full Hebrew description
     order REAL DEFAULT 999.0,       -- Display order from TOC
     totalLines INTEGER DEFAULT 0,
     isBaseBook INTEGER DEFAULT 1,

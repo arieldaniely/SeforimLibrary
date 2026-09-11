@@ -6,7 +6,8 @@ import kotlinx.serialization.Serializable
 internal object SefariaImportTuning {
     const val LINE_BATCH_SIZE = 5_000
     const val LINK_BATCH_SIZE = 2_000
-    const val FILE_PARALLELISM = 8
+    val FILE_PARALLELISM: Int = (System.getProperty("fileParallelism")
+        ?: System.getenv("SEFARIA_FILE_PARALLELISM"))?.toIntOrNull()?.coerceIn(1, 16) ?: 2
 }
 
 /**
@@ -51,9 +52,14 @@ internal data class BookPayload(
     val refEntries: List<RefEntry>,
     val headings: List<Heading>,
     val authors: List<String>,
+    // Long description (Sefaria heDesc) -> book.heDesc.
     val description: String?,
     val pubDates: List<PubDate>,
     val altStructures: List<AltStructurePayload>,
+    // Real one-line summary (Sefaria heShortDesc) -> book.heShortDesc.
+    val heShortDesc: String? = null,
+    // Display name -> Sefaria Topic slug, used to join books to rich author metadata.
+    val authorSlugsByName: Map<String, String> = emptyMap(),
     // Schema metadata used for link orientation. baseTextTitleKeys holds the
     // *normalized* titles (en+he) of declared base texts; resolution to bookIds
     // happens in a second pass once all books have been inserted.

@@ -11,6 +11,8 @@ import kotlinx.serialization.Serializable
  * @property title The title of the category
  * @property level The level of the category in the hierarchy (0 for root categories)
  * @property order The display order of the category (lower values appear first)
+ * @property heShortDesc A short Hebrew description from Sefaria's table of contents
+ * @property heDesc The full Hebrew description from Sefaria's table of contents
  */
 @Stable
 @Serializable
@@ -19,5 +21,7 @@ data class Category(
     val parentId: Long? = null,
     val title: String,
     val level: Int = 0,
-    val order: Int = 999
+    val order: Int = 999,
+    val heShortDesc: String? = null,
+    val heDesc: String? = null,
 )

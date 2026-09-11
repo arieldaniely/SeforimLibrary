@@ -6,12 +6,15 @@ import app.cash.sqldelight.db.QueryResult
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.db.SEFORIM_DB_PAGE_SIZE_PRAGMA
+import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.ids.SqliteIdAllocator
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 
 /**
  * Phase 2 entry point: process links only (requires that books/lines already exist).
@@ -90,26 +93,40 @@ fun main(args: Array<String>) = runBlocking {
             if (explicit != null) Paths.get(explicit) else Paths.get("$persistDbPath.buildstate")
         }
         val prev = buildStatePath.takeIf { Files.exists(it) }
-        val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
+        val lowResource = (System.getProperty("lowResource")
+            ?: System.getenv("SEFORIM_LOW_RESOURCE")
+            ?: "true").toBoolean()
+        val buildStateCandidate = Paths.get("$buildStatePath.building")
+        val allocator: IdAllocator = if (lowResource) {
+            SqliteIdAllocator.open(prev, buildStateCandidate, Logger.withTag("IdAllocator"))
+        } else {
+            InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
+        }
+        var allocatorClosed = false
 
-        val generator = DatabaseGenerator(
-            sourceDirectory = Paths.get(sourceDir),
-            repository = repository,
-            acronymDbPath = null,
-            filterSourcesForLinks = false,
-            allocator = allocator,
-        )
-        generator.generateLinksOnly()
-        runCatching {
+        try {
+            val generator = DatabaseGenerator(
+                sourceDirectory = Paths.get(sourceDir),
+                repository = repository,
+                acronymDbPath = null,
+                filterSourcesForLinks = false,
+                allocator = allocator,
+            )
+            generator.generateLinksOnly()
+            val snapshotTarget = if (lowResource) buildStateCandidate else buildStatePath
             allocator.snapshotTo(
-                target = buildStatePath,
+                target = snapshotTarget,
                 extraMeta = mapOf(
                     "generator" to "otzariasqlite/generateLinks",
                     "generated_at" to java.time.Instant.now().toString(),
                 ),
             )
-        }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
-        Unit
+            (allocator as? AutoCloseable)?.close()
+            allocatorClosed = true
+            if (lowResource) promoteLinksBuildState(buildStateCandidate, buildStatePath)
+        } finally {
+            if (!allocatorClosed) (allocator as? AutoCloseable)?.close()
+        }
         if (useMemoryDb) {
             // Persist in-memory DB to disk using VACUUM INTO (target must not exist)
             runCatching {
@@ -138,5 +155,14 @@ fun main(args: Array<String>) = runBlocking {
         throw e
     } finally {
         repository.close()
+    }
+}
+
+private fun promoteLinksBuildState(candidate: Path, target: Path) {
+    Files.createDirectories(target.toAbsolutePath().parent)
+    runCatching {
+        Files.move(candidate, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    }.getOrElse {
+        Files.move(candidate, target, StandardCopyOption.REPLACE_EXISTING)
     }
 }

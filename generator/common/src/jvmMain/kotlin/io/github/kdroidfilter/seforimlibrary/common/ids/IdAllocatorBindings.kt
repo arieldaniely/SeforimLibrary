@@ -90,10 +90,12 @@ class IdAllocatorBindings(
         title: String,
         level: Int,
         orderIndex: Int,
+        heShortDesc: String? = null,
+        heDesc: String? = null,
     ): Long {
         val id = allocator.categoryId(canonicalPath)
         if (categoriesInserted.add(canonicalPath)) {
-            repo.insertCategoryWithId(id, parentId, title, level, orderIndex)
+            repo.insertCategoryWithId(id, parentId, title, level, orderIndex, heShortDesc, heDesc)
         }
         return id
     }

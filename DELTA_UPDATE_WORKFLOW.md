@@ -146,7 +146,7 @@ sequenceDiagram
     Cat-->>Gradle: catalog.pb (~650 KB)
     Gradle->>Lucene: build Lucene segments<br/>(text index over line.content)
     Lucene-->>Gradle: seforim.db.lucene/ + .lookup.lucene/
-    Gradle->>Stamp: INSERT OR REPLACE INTO schema_meta<br/>VALUES ('db_version', '2'),<br/>('db_schema_version', '1')
+    Gradle->>Stamp: INSERT OR REPLACE INTO schema_meta<br/>VALUES ('db_version', '2'),<br/>('db_schema_version', '2')
     Note over Stamp: This row is what lets the<br/>client choose the right delta
     Stamp-->>Gradle: seforim.db (stamped)
     Gradle->>Patch: produce(prev=v1, new=v2)

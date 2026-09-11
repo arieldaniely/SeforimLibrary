@@ -4,10 +4,10 @@ plugins {
 }
 
 // Generator forked-JVM heap. Honors -PgeneratorHeap=… (CI lowers it on 16 GB runners).
-// Default 10g matches local workstation use; CI sets 5g via the workflow.
+// The bounded, disk-backed importer is designed to run on small CI machines.
 val generatorHeap: String = (project.findProperty("generatorHeap") as String?)
     ?: System.getenv("SEFORIM_GENERATOR_HEAP")
-    ?: "10g"
+    ?: "3g"
 
 
 kotlin {
@@ -64,6 +64,9 @@ tasks.register<JavaExec>("generateSefariaSqlite") {
     }
     if (project.hasProperty("inMemoryDb")) {
         systemProperty("inMemoryDb", project.property("inMemoryDb") as String)
+    }
+    listOf("lowResource", "fileParallelism", "authorMetadataMode", "authorMetadataCache").forEach { name ->
+        if (project.hasProperty(name)) systemProperty(name, project.property(name) as String)
     }
 
     // Optional JVM tuning (similar to generator)

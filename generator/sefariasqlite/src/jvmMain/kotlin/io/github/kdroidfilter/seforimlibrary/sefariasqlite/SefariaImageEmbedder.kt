@@ -41,7 +41,6 @@ import kotlin.io.path.readBytes
 object SefariaImageEmbedder {
     private const val URL_PREFIX = "https://textimages.sefaria.org/"
     private const val USER_AGENT = "SeforimLibrary-SefariaImageEmbedder/1.0"
-    private const val DOWNLOAD_PARALLELISM = 16
     private const val MAX_IMAGE_BYTES = 5 * 1024 * 1024 // 5 MiB ceiling per image
 
     private val client: HttpClient by lazy {
@@ -89,7 +88,7 @@ object SefariaImageEmbedder {
         }
         logger.i { "Embedder: ${urls.size} unique Sefaria image URLs to process" }
 
-        val semaphore = Semaphore(DOWNLOAD_PARALLELISM)
+        val semaphore = Semaphore(SefariaImportTuning.FILE_PARALLELISM)
         var newlyDownloaded = 0
         var failed = 0
 

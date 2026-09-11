@@ -9,6 +9,9 @@ SELECT * FROM author WHERE id = ?;
 selectByName:
 SELECT * FROM author WHERE name = ? LIMIT 1;
 
+selectBySlug:
+SELECT * FROM author WHERE sefariaSlug = ? LIMIT 1;
+
 selectByBookId:
 SELECT a.* FROM author a
 JOIN book_author ba ON a.id = ba.authorId
@@ -26,6 +29,27 @@ VALUES (?);
 
 insertWithId:
 INSERT OR IGNORE INTO author (id, name) VALUES (?, ?);
+
+upsertDetailsWithId:
+INSERT INTO author (
+    id, name, sefariaSlug, heBio, birthYear, birthYearIsApprox,
+    deathYear, deathYearIsApprox, era, eraName, birthPlace, deathPlace,
+    heWikiLink, heNliLink
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    name = excluded.name,
+    sefariaSlug = excluded.sefariaSlug,
+    heBio = excluded.heBio,
+    birthYear = excluded.birthYear,
+    birthYearIsApprox = excluded.birthYearIsApprox,
+    deathYear = excluded.deathYear,
+    deathYearIsApprox = excluded.deathYearIsApprox,
+    era = excluded.era,
+    eraName = excluded.eraName,
+    birthPlace = excluded.birthPlace,
+    deathPlace = excluded.deathPlace,
+    heWikiLink = excluded.heWikiLink,
+    heNliLink = excluded.heNliLink;
 
 selectIdByName:
 SELECT id FROM author WHERE name = ? LIMIT 1;
@@ -54,3 +78,23 @@ DELETE FROM book_author WHERE bookId = ?;
 
 countBookAuthors:
 SELECT COUNT(*) FROM book_author WHERE bookId = ?;
+
+selectAliases:
+SELECT * FROM author_alias WHERE authorId = ? ORDER BY isPrimary DESC, name;
+
+insertAlias:
+INSERT OR REPLACE INTO author_alias (authorId, name, isPrimary) VALUES (?, ?, ?);
+
+deleteAliases:
+DELETE FROM author_alias WHERE authorId = ?;
+
+selectRelations:
+SELECT * FROM author_relation WHERE authorId = ? ORDER BY relationTypeHe, targetName;
+
+insertRelation:
+INSERT OR REPLACE INTO author_relation (
+    authorId, targetSlug, targetName, relationType, relationTypeHe, isInverse
+) VALUES (?, ?, ?, ?, ?, ?);
+
+deleteRelations:
+DELETE FROM author_relation WHERE authorId = ?;

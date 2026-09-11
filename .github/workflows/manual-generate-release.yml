@@ -25,6 +25,13 @@ on:
         type: boolean
         required: false
         default: true
+      draft:
+        description: |
+          Create an unpublished draft release. Drafts upload every asset but
+          do not update release-manifest.json until they are published.
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -59,13 +66,13 @@ jobs:
           docker-images: false
           swap-storage: false
 
-      - name: Bridle daemon heaps + generator forks for the 16 GB runner
+      - name: Configure bounded heaps for a small runner
         run: |
           mkdir -p ~/.gradle
           cat >> ~/.gradle/gradle.properties <<EOF
-          org.gradle.jvmargs=-Xmx3g
+          org.gradle.jvmargs=-Xmx1g
           kotlin.compiler.execution.strategy=in-process
-          generatorHeap=8g
+          generatorHeap=3g
           EOF
 
       - name: Install JBR 25
@@ -154,7 +161,9 @@ jobs:
             -PreleaseName=${{ steps.release_meta.outputs.release_tag }} \
             -PdbVersion=${{ steps.discover.outputs.db_version }} \
             -PinMemoryDb=false \
-            --no-daemon --stacktrace
+            -PlowResource=true \
+            -PfileParallelism=2 \
+            --max-workers=1 --no-daemon --stacktrace
 
       - name: Package Seforim Bundle (split tar.zst)
         run: ./gradlew packageSeforimBundle --no-daemon --stacktrace
@@ -204,6 +213,14 @@ jobs:
             PREV_DB=$(find prev-dbs/extract -name seforim.db -type f | head -n1)
             test -s "$PREV_DB" || { echo "::error::seforim.db not found in bundle of $TAG"; exit 1; }
 
+            CURRENT_SCHEMA=$(sqlite3 build/seforim.db "SELECT value FROM schema_meta WHERE key='db_schema_version';")
+            PREV_SCHEMA=$(sqlite3 "$PREV_DB" "SELECT value FROM schema_meta WHERE key='db_schema_version';")
+            if [ "$CURRENT_SCHEMA" != "$PREV_SCHEMA" ]; then
+              echo "Schema changed ($PREV_SCHEMA → $CURRENT_SCHEMA); full bundle is required, skipping this delta."
+              rm -rf prev-dbs
+              continue
+            fi
+
             ./gradlew :generator-common:producePatchAndVerify \
               -PprevDb=$PWD/$PREV_DB \
               -PnewDb=$PWD/build/seforim.db \
@@ -249,12 +266,12 @@ jobs:
             exit 1
           fi
 
-      - name: Create GitHub pre-release and upload assets
+      - name: Create GitHub release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.release_tag }}
           name: ${{ steps.release_meta.outputs.release_tag }}
-          draft: false
+          draft: ${{ inputs.draft }}
           prerelease: ${{ inputs.prerelease }}
           files: release-staging/*
 
@@ -266,6 +283,7 @@ jobs:
       # it inline gives us atomicity (manifest reflects the release we
       # just published before this run finishes).
       - name: Refresh release-manifest.json on master
+        if: inputs.draft == false
         run: |
           set -euo pipefail
           # `gh release view` (no args) → the "Latest" tagged release. With

@@ -10,6 +10,9 @@ import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocEntry
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocStructure
 import io.github.kdroidfilter.seforimlibrary.core.models.Author
+import io.github.kdroidfilter.seforimlibrary.core.models.AuthorAlias
+import io.github.kdroidfilter.seforimlibrary.core.models.AuthorDetails
+import io.github.kdroidfilter.seforimlibrary.core.models.AuthorRelation
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
@@ -413,7 +416,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 parentId = category.parentId,
                 title = category.title,
                 level = category.level.toLong(),
-                orderIndex = category.order.toLong()
+                orderIndex = category.order.toLong(),
+                heShortDesc = category.heShortDesc,
+                heDesc = category.heDesc,
             )
 
             val insertedId = database.categoryQueriesQueries.lastInsertRowId().executeAsOne()
@@ -653,6 +658,70 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             logger.d{"Author not found: $name"}
         }
         return@withContext author?.toModel()
+    }
+
+    suspend fun getAuthorBySlug(slug: String): Author? = withContext(Dispatchers.IO) {
+        database.authorQueriesQueries.selectBySlug(slug).executeAsOneOrNull()?.toModel()
+    }
+
+    suspend fun getAuthorDetails(authorId: Long): AuthorDetails? = withContext(Dispatchers.IO) {
+        val author = database.authorQueriesQueries.selectById(authorId).executeAsOneOrNull()?.toModel()
+            ?: return@withContext null
+        val aliases = database.authorQueriesQueries.selectAliases(authorId).executeAsList().map {
+            AuthorAlias(it.authorId, it.name, it.isPrimary == 1L)
+        }
+        val relations = database.authorQueriesQueries.selectRelations(authorId).executeAsList().map {
+            AuthorRelation(
+                authorId = it.authorId,
+                targetSlug = it.targetSlug,
+                targetName = it.targetName,
+                relationType = it.relationType,
+                relationTypeHe = it.relationTypeHe,
+                isInverse = it.isInverse == 1L,
+            )
+        }
+        AuthorDetails(author, aliases, relations)
+    }
+
+    suspend fun upsertAuthorDetails(details: AuthorDetails) = withContext(Dispatchers.IO) {
+        val author = details.author
+        database.transaction {
+            database.authorQueriesQueries.upsertDetailsWithId(
+                id = author.id,
+                name = author.name,
+                sefariaSlug = author.sefariaSlug,
+                heBio = author.heBio,
+                birthYear = author.birthYear?.toLong(),
+                birthYearIsApprox = if (author.birthYearIsApprox) 1 else 0,
+                deathYear = author.deathYear?.toLong(),
+                deathYearIsApprox = if (author.deathYearIsApprox) 1 else 0,
+                era = author.era,
+                eraName = author.eraName,
+                birthPlace = author.birthPlace,
+                deathPlace = author.deathPlace,
+                heWikiLink = author.heWikiLink,
+                heNliLink = author.heNliLink,
+            )
+            database.authorQueriesQueries.deleteAliases(author.id)
+            details.aliases.forEach { alias ->
+                database.authorQueriesQueries.insertAlias(
+                    authorId = author.id,
+                    name = alias.name,
+                    isPrimary = if (alias.isPrimary) 1 else 0,
+                )
+            }
+            database.authorQueriesQueries.deleteRelations(author.id)
+            details.relations.forEach { relation ->
+                database.authorQueriesQueries.insertRelation(
+                    authorId = author.id,
+                    targetSlug = relation.targetSlug,
+                    targetName = relation.targetName,
+                    relationType = relation.relationType,
+                    relationTypeHe = relation.relationTypeHe,
+                    isInverse = if (relation.isInverse) 1 else 0,
+                )
+            }
+        }
     }
 
     // Insert an author and return its ID
@@ -945,6 +1014,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 title = book.title,
                 heRef = book.heRef,
                 heShortDesc = book.heShortDesc,
+                heDesc = book.heDesc,
                 notesContent = book.notesContent,
                 orderIndex = book.order.toLong(),
                 totalLines = book.totalLines.toLong(),
@@ -1003,6 +1073,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 title = book.title,
                 heRef = book.heRef,
                 heShortDesc = book.heShortDesc,
+                heDesc = book.heDesc,
                 notesContent = book.notesContent,
                 orderIndex = book.order.toLong(),
                 totalLines = book.totalLines.toLong(),
@@ -1603,7 +1674,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
      * @param name The name of the connection type
      * @return The ID of the connection type
      */
-    private suspend fun getOrCreateConnectionType(name: String): Long = withContext(Dispatchers.IO) {
+    suspend fun getOrCreateConnectionType(name: String): Long = withContext(Dispatchers.IO) {
         logger.d{"Getting or creating connection type: $name"}
 
         // Check if the connection type already exists
@@ -2532,7 +2603,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 val targetBookOrderIndex = resolveBookOrderIndex(link.targetBookId)
 
                 val declaredFlag: Long = if (link.isDeclaredBase) 1L else 0L
-                if (link.id > 0) {
+                // Zero means "let SQLite allocate". Negative IDs are an
+                // intentional deterministic namespace for generated links.
+                if (link.id != 0L) {
                     database.linkQueriesQueries.insertWithId(
                         id = link.id,
                         sourceBookId = link.sourceBookId,
@@ -3130,6 +3203,8 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         title: String,
         level: Int,
         orderIndex: Int,
+        heShortDesc: String? = null,
+        heDesc: String? = null,
     ) = withContext(Dispatchers.IO) {
         database.categoryQueriesQueries.insertWithId(
             id = id,
@@ -3137,8 +3212,15 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             title = title,
             level = level.toLong(),
             orderIndex = orderIndex.toLong(),
+            heShortDesc = heShortDesc,
+            heDesc = heDesc,
         )
     }
+
+    suspend fun updateCategoryDescriptions(id: Long, heShortDesc: String?, heDesc: String?) =
+        withContext(Dispatchers.IO) {
+            database.categoryQueriesQueries.updateDescriptions(heShortDesc, heDesc, id)
+        }
 
     suspend fun insertTocTextWithId(id: Long, text: String) = withContext(Dispatchers.IO) {
         database.tocTextQueriesQueries.insertWithId(id, text)

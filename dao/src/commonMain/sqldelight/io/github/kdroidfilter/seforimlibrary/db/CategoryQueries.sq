@@ -22,12 +22,15 @@ selectManyByTitleLike:
 SELECT * FROM category WHERE title LIKE ? ORDER BY level ASC, title LIMIT ?;
 
 insert:
-INSERT INTO category (parentId, title, level, orderIndex)
-VALUES (?, ?, ?, ?);
+INSERT INTO category (parentId, title, level, orderIndex, heShortDesc, heDesc)
+VALUES (?, ?, ?, ?, ?, ?);
 
 insertWithId:
-INSERT OR IGNORE INTO category (id, parentId, title, level, orderIndex)
-VALUES (?, ?, ?, ?, ?);
+INSERT OR IGNORE INTO category (id, parentId, title, level, orderIndex, heShortDesc, heDesc)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+updateDescriptions:
+UPDATE category SET heShortDesc = ?, heDesc = ? WHERE id = ?;
 
 update:
 UPDATE category SET

@@ -68,7 +68,7 @@ fun main() = runBlocking {
         System.getProperty("vectorsBin")?.let { loadVectorProvider(Paths.get(it), logger) }
 
     // Open repository (prefer in-memory for faster reads)
-    val useMemoryDb = (System.getProperty("inMemoryDb") ?: "true") != "false"
+    val useMemoryDb = (System.getProperty("inMemoryDb") ?: "false") == "true"
     // Use a shared in-memory DB so multiple connections can read concurrently when multithreading
     val jdbcUrl = if (useMemoryDb) "jdbc:sqlite:file:seforim_index_std?mode=memory&cache=shared" else "jdbc:sqlite:$dbPath"
     val driver = JdbcSqliteDriver(url = jdbcUrl)

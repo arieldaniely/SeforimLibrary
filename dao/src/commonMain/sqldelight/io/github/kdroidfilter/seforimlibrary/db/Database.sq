@@ -28,6 +28,8 @@
 --     book_topic.topicId              -> topic(id)               ON DELETE CASCADE
 --     book_author.bookId              -> book(id)                ON DELETE CASCADE
 --     book_author.authorId            -> author(id)              ON DELETE CASCADE
+--     author_alias.authorId            -> author(id)              ON DELETE CASCADE
+--     author_relation.authorId         -> author(id)              ON DELETE CASCADE
 --     line.bookId                     -> book(id)                ON DELETE CASCADE
 --     line.tocEntryId                 -> tocEntry(id)            ON DELETE SET NULL
 --     tocEntry.bookId                 -> book(id)                ON DELETE CASCADE
@@ -70,6 +72,8 @@ CREATE TABLE IF NOT EXISTS category (
     title TEXT NOT NULL,
     level INTEGER NOT NULL DEFAULT 0,
     orderIndex INTEGER NOT NULL DEFAULT 999,
+    heShortDesc TEXT,
+    heDesc TEXT,
     FOREIGN KEY (parentId) REFERENCES category(id) ON DELETE CASCADE
 );
 
@@ -91,10 +95,47 @@ CREATE INDEX IF NOT EXISTS idx_category_closure_descendant ON category_closure(d
 -- Authors table
 CREATE TABLE IF NOT EXISTS author (
     id INTEGER PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL UNIQUE
+    name TEXT NOT NULL UNIQUE,
+    sefariaSlug TEXT UNIQUE,
+    heBio TEXT,
+    birthYear INTEGER,
+    birthYearIsApprox INTEGER NOT NULL DEFAULT 0,
+    deathYear INTEGER,
+    deathYearIsApprox INTEGER NOT NULL DEFAULT 0,
+    era TEXT,
+    eraName TEXT,
+    birthPlace TEXT,
+    deathPlace TEXT,
+    heWikiLink TEXT,
+    heNliLink TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_author_name ON author(name);
+CREATE INDEX IF NOT EXISTS idx_author_slug ON author(sefariaSlug);
+
+CREATE TABLE IF NOT EXISTS author_alias (
+    authorId INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    isPrimary INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (authorId, name),
+    FOREIGN KEY (authorId) REFERENCES author(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_author_alias_name ON author_alias(name);
+
+CREATE TABLE IF NOT EXISTS author_relation (
+    authorId INTEGER NOT NULL,
+    targetSlug TEXT NOT NULL,
+    targetName TEXT,
+    relationType TEXT NOT NULL,
+    relationTypeHe TEXT,
+    isInverse INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (authorId, targetSlug, relationType, isInverse),
+    FOREIGN KEY (authorId) REFERENCES author(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_author_relation_author ON author_relation(authorId);
+CREATE INDEX IF NOT EXISTS idx_author_relation_target ON author_relation(targetSlug);
 
 -- Table des topics
 CREATE TABLE IF NOT EXISTS topic (
@@ -136,6 +177,8 @@ CREATE TABLE IF NOT EXISTS book (
     title TEXT NOT NULL,
     heRef TEXT,
     heShortDesc TEXT,
+    -- Full (long) Hebrew description; heShortDesc is the one-line summary.
+    heDesc TEXT,
     -- Optional raw notes attached to the base book (when a companion file 'הערות על <title>' exists)
     notesContent TEXT,
     orderIndex INTEGER NOT NULL DEFAULT 999,

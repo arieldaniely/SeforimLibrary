@@ -6,7 +6,9 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.db.SEFORIM_DB_PAGE_SIZE_PRAGMA
+import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.ids.SqliteIdAllocator
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
@@ -14,6 +16,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 
 /**
  * Phase 1 entry point: generate categories, books, TOCs and lines only.
@@ -132,7 +135,16 @@ fun main(args: Array<String>) = runBlocking {
         if (explicit != null) Paths.get(explicit) else Paths.get("$persistDbPath.buildstate")
     }
     val prev = buildStatePath.takeIf { Files.exists(it) }
-    val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
+    val lowResource = (System.getProperty("lowResource")
+        ?: System.getenv("SEFORIM_LOW_RESOURCE")
+        ?: "true").toBoolean()
+    val buildStateCandidate = Paths.get("$buildStatePath.building")
+    val allocator: IdAllocator = if (lowResource) {
+        SqliteIdAllocator.open(prev, buildStateCandidate, Logger.withTag("IdAllocator"))
+    } else {
+        InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
+    }
+    var allocatorClosed = false
 
     try {
         val buildVersion: Int = (System.getProperty("buildVersion")
@@ -167,21 +179,32 @@ fun main(args: Array<String>) = runBlocking {
             }
         }
         // Persist build_state so subsequent phases/builds reuse the same ids.
-        runCatching {
-            allocator.snapshotTo(
-                target = buildStatePath,
-                extraMeta = mapOf(
-                    "generator" to "otzariasqlite/generateLines",
-                    "generated_at" to java.time.Instant.now().toString(),
-                ),
-            )
-        }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
-        Unit
+        val snapshotTarget = if (lowResource) buildStateCandidate else buildStatePath
+        allocator.snapshotTo(
+            target = snapshotTarget,
+            extraMeta = mapOf(
+                "generator" to "otzariasqlite/generateLines",
+                "generated_at" to java.time.Instant.now().toString(),
+            ),
+        )
+        (allocator as? AutoCloseable)?.close()
+        allocatorClosed = true
+        if (lowResource) promoteLinesBuildState(buildStateCandidate, buildStatePath)
         logger.i { "Phase 1 completed successfully. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
     } catch (e: Exception) {
         logger.e(e) { "Error during phase 1 generation" }
         throw e
     } finally {
         repository.close()
+        if (!allocatorClosed) (allocator as? AutoCloseable)?.close()
+    }
+}
+
+private fun promoteLinesBuildState(candidate: Path, target: Path) {
+    Files.createDirectories(target.toAbsolutePath().parent)
+    runCatching {
+        Files.move(candidate, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    }.getOrElse {
+        Files.move(candidate, target, StandardCopyOption.REPLACE_EXISTING)
     }
 }

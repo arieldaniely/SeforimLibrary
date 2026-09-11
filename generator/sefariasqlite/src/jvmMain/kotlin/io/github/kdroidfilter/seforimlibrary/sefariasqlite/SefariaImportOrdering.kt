@@ -15,22 +15,29 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.exists
 import kotlin.io.path.isDirectory
 
-/**
- * Parse `table_of_contents.json` to extract category and book orders.
- */
-internal fun parseTableOfContentsOrders(
+internal data class CategoryDescriptions(val heShortDesc: String?, val heDesc: String?)
+
+internal data class ParsedTableOfContents(
+    val categoryOrders: Map<String, Int>,
+    val bookOrders: Map<String, Int>,
+    val categoryDescriptions: Map<String, CategoryDescriptions>,
+)
+
+/** Parse ordering and Hebrew category descriptions from `table_of_contents.json`. */
+internal fun parseTableOfContentsMetadata(
     dbRoot: Path,
     json: Json,
     logger: Logger
-): Pair<Map<String, Int>, Map<String, Int>> {
+): ParsedTableOfContents {
     val tocFile = dbRoot.resolve("table_of_contents.json")
     if (!Files.exists(tocFile)) {
         logger.w { "table_of_contents.json not found, using default ordering" }
-        return Pair(emptyMap(), emptyMap())
+        return ParsedTableOfContents(emptyMap(), emptyMap(), emptyMap())
     }
 
     val categoryOrders = ConcurrentHashMap<String, Int>()
     val bookOrders = ConcurrentHashMap<String, Int>()
+    val categoryDescriptions = ConcurrentHashMap<String, CategoryDescriptions>()
 
     try {
         val tocJson = Files.readString(tocFile)
@@ -53,6 +60,12 @@ internal fun parseTableOfContentsOrders(
 
             val category = item["category"]?.jsonPrimitive?.contentOrNull
             val heCategory = item["heCategory"]?.jsonPrimitive?.contentOrNull
+            val heShortDesc = item["heShortDesc"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            val heDesc = item["heDesc"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            if (heCategory != null && (heShortDesc != null || heDesc != null)) {
+                val fullPath = (categoryPath + heCategory).joinToString("/") { sanitizeFolder(it) }
+                categoryDescriptions.putIfAbsent(fullPath, CategoryDescriptions(heShortDesc, heDesc))
+            }
             if (order != null && categoryPath.isNotEmpty()) {
                 if (category != null) {
                     val fullPath = (categoryPath + category).joinToString("/")
@@ -81,6 +94,8 @@ internal fun parseTableOfContentsOrders(
             val catNameEn = obj["category"]?.jsonPrimitive?.contentOrNull
             val catNameHe = obj["heCategory"]?.jsonPrimitive?.contentOrNull
             val order = obj["order"]?.jsonPrimitive?.intOrNull ?: return@forEach
+            val heShortDesc = obj["heShortDesc"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+            val heDesc = obj["heDesc"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
 
             if (catNameEn != null) {
                 categoryOrders[catNameEn] = order
@@ -89,6 +104,9 @@ internal fun parseTableOfContentsOrders(
             if (catNameHe != null) {
                 categoryOrders[catNameHe] = order
                 categoryOrders[sanitizeFolder(catNameHe)] = order
+                if (heShortDesc != null || heDesc != null) {
+                    categoryDescriptions[sanitizeFolder(catNameHe)] = CategoryDescriptions(heShortDesc, heDesc)
+                }
             }
 
             val pathKey = catNameHe ?: catNameEn ?: return@forEach
@@ -97,12 +115,15 @@ internal fun parseTableOfContentsOrders(
             }
         }
 
-        logger.i { "Parsed TOC orders: ${categoryOrders.size} categories, ${bookOrders.size} books" }
+        logger.i {
+            "Parsed TOC metadata: ${categoryOrders.size} category orders, " +
+                "${bookOrders.size} book orders, ${categoryDescriptions.size} descriptions"
+        }
     } catch (e: Exception) {
         logger.e(e) { "Error parsing table_of_contents.json" }
     }
 
-    return Pair(categoryOrders, bookOrders)
+    return ParsedTableOfContents(categoryOrders, bookOrders, categoryDescriptions)
 }
 
 internal fun normalizePriorityEntry(raw: String): String {

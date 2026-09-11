@@ -28,7 +28,8 @@ import kotlin.io.path.readText
 
 internal class SefariaBookPayloadReader(
     private val json: Json,
-    private val logger: Logger
+    private val logger: Logger,
+    private val authorCatalog: SefariaAuthorCatalog = SefariaAuthorCatalog.EMPTY,
 ) {
     fun buildSchemaLookup(schemaDir: Path): Map<String, Path> {
         val lookup = ConcurrentHashMap<String, Path>()
@@ -56,10 +57,7 @@ internal class SefariaBookPayloadReader(
         schemaDir: Path,
         schemaLookup: Map<String, Path>
     ): List<BookPayload> = coroutineScope {
-        val mergedFiles = Files.walk(jsonDir).use { stream ->
-            stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
-                .toList()
-        }
+        val mergedFiles = listMergedFiles(jsonDir)
 
         logger.i { "Found ${mergedFiles.size} merged.json files to process" }
 
@@ -73,6 +71,26 @@ internal class SefariaBookPayloadReader(
                 }
             }
         }.awaitAll().filterNotNull()
+    }
+
+    /** Sorted paths are cheap to retain and keep stable IDs reproducible. */
+    fun listMergedFiles(jsonDir: Path): List<Path> = Files.walk(jsonDir).use { stream ->
+        stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
+            .sorted()
+            .toList()
+    }
+
+    /**
+     * Low-resource path: parse one book only when the importer is ready to
+     * persist it. The large line arrays are therefore eligible for collection
+     * immediately after each book instead of accumulating for the whole corpus.
+     */
+    fun readBooksSequentially(
+        mergedFiles: List<Path>,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+    ): Sequence<BookPayload> = mergedFiles.asSequence().mapNotNull { path ->
+        parseBookFile(path, schemaDir, schemaLookup)
     }
 
     private fun parseBookFile(
@@ -105,9 +123,16 @@ internal class SefariaBookPayloadReader(
                 ?: textJson["categories"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
                 ?: emptyList()
 
-            val authors = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
-                author.jsonObject["he"]?.stringOrNull()
+            val authorEntries = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
+                val entry = author.jsonObject
+                val schemaName = entry["he"]?.stringOrNull() ?: return@mapNotNull null
+                val slug = entry["slug"]?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+                authorCatalog.displayName(slug, schemaName) to slug
             } ?: emptyList()
+            val authors = authorEntries.map { it.first }
+            val authorSlugsByName = authorEntries.mapNotNull { (name, slug) ->
+                slug?.let { name to it }
+            }.toMap()
 
             val (lines, refs, headings) = buildBookContent(
                 schemaObj = schemaObj,
@@ -117,6 +142,7 @@ internal class SefariaBookPayloadReader(
                 authors = authors
             )
             val description = extractDescription(schemaJson, schemaObj)
+            val heShortDesc = extractShortDescription(schemaJson, schemaObj)
             val pubDates = extractPubDates(schemaJson, schemaObj)
             val altStructures = parseAltStructures(schemaJson)
             val dependence = extractDependence(schemaJson, schemaObj)
@@ -146,6 +172,8 @@ internal class SefariaBookPayloadReader(
                 description = description,
                 pubDates = pubDates,
                 altStructures = altStructures,
+                heShortDesc = heShortDesc,
+                authorSlugsByName = authorSlugsByName,
                 dependence = dependence,
                 baseTextTitleKeys = baseTextTitleKeys,
                 collectiveTitleEn = collectiveTitleEn,
@@ -267,6 +295,10 @@ internal class SefariaBookPayloadReader(
             ?: schemaJson["heDescription"]?.stringOrNull()
             ?: schemaObj["heDescription"]?.stringOrNull()
     }
+
+    private fun extractShortDescription(schemaJson: JsonObject, schemaObj: JsonObject): String? =
+        schemaJson["heShortDesc"]?.stringOrNull()
+            ?: schemaObj["heShortDesc"]?.stringOrNull()
 
     private fun extractPubDates(schemaJson: JsonObject, schemaObj: JsonObject): List<PubDate> {
         val dates = mutableListOf<String>()
