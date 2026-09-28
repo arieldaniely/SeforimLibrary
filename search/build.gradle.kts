@@ -1,6 +1,25 @@
+import org.gradle.process.CommandLineArgumentProvider
+
 plugins {
     alias(libs.plugins.multiplatform)
     alias(libs.plugins.kotlinx.serialization)
+}
+
+tasks.register<JavaExec>("buildSemanticIndex") {
+    group = "application"
+    description = "Build one optional Round 2 semantic Lucene shard"
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.search.BuildSemanticIndexKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val db = providers.gradleProperty("seforimDb").orElse(providers.environmentVariable("SEFORIM_DB"))
+    val model = providers.gradleProperty("semanticModelDir")
+    val output = providers.gradleProperty("semanticIndexDir")
+    argumentProviders.add(CommandLineArgumentProvider {
+        listOf(db.get(), model.get(), output.get(),
+            providers.gradleProperty("shardIndex").orElse("0").get(),
+            providers.gradleProperty("shardCount").orElse("1").get())
+    })
+    maxHeapSize = "4g"
 }
 
 group = "io.github.kdroidfilter.seforimlibrary"

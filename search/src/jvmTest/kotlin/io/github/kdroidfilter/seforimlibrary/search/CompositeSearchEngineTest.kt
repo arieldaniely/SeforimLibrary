@@ -39,7 +39,7 @@ class CompositeSearchEngineTest {
     ) : SearchEngine {
         override fun openSession(
             query: String, near: Int, bookFilter: Long?, categoryFilter: Long?, bookIds: Collection<Long>?,
-            lineIds: Collection<Long>?, baseBookOnly: Boolean,
+            lineIds: Collection<Long>?, baseBookOnly: Boolean, mode: SearchMode,
         ): SearchSession = object : SearchSession {
             private var offset = 0
             override suspend fun nextPage(limit: Int): SearchPage? {
@@ -56,7 +56,7 @@ class CompositeSearchEngineTest {
         override fun buildHighlightTerms(query: String): List<String> = emptyList()
         override fun computeFacets(
             query: String, near: Int, bookFilter: Long?, categoryFilter: Long?, bookIds: Collection<Long>?,
-            lineIds: Collection<Long>?, baseBookOnly: Boolean,
+            lineIds: Collection<Long>?, baseBookOnly: Boolean, mode: SearchMode,
         ): SearchFacets = facets
         override fun close() = Unit
     }

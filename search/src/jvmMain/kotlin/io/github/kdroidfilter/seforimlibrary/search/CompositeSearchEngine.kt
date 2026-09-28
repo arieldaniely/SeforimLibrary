@@ -30,10 +30,11 @@ class CompositeSearchEngine(
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
         baseBookOnly: Boolean,
+        mode: SearchMode,
     ): SearchSession? {
-        val baseSession = base.openSession(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
+        val baseSession = base.openSession(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode)
         val personalSession = personalDelegate?.openSession(
-            query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly,
+            query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode,
         )
         return when {
             baseSession == null -> personalSession
@@ -69,10 +70,11 @@ class CompositeSearchEngine(
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
         baseBookOnly: Boolean,
+        mode: SearchMode,
     ): SearchFacets? {
-        val first = base.computeFacets(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
+        val first = base.computeFacets(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode)
         val second = personalDelegate?.computeFacets(
-            query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly,
+            query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode,
         )
         if (first == null) return second
         if (second == null) return first

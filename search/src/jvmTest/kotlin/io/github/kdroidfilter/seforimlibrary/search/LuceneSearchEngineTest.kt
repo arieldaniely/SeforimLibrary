@@ -108,6 +108,36 @@ class LuceneSearchEngineTest {
     // --- openSession tests ---
 
     @Test
+    fun `exact mode does not match a substring through ngrams`() {
+        val tempDir = createTempIndexDir()
+        try {
+            FSDirectory.open(tempDir).use { dir ->
+                IndexWriter(dir, IndexWriterConfig(StandardAnalyzer())).use { writer ->
+                    writer.addDocument(Document().apply {
+                        add(StringField("type", "line", Field.Store.NO))
+                        add(StoredField("book_id", 1))
+                        add(StoredField("book_title", "ספר בדיקה"))
+                        add(StoredField("line_id", 1))
+                        add(StoredField("line_index", 0))
+                        add(TextField("text", "בראשית", Field.Store.NO))
+                        add(TextField("text_ng4", "ראשי אשית", Field.Store.NO))
+                        add(StoredField("text_raw", "בראשית"))
+                    })
+                }
+            }
+            val engine = LuceneSearchEngine(tempDir)
+            engine.openSession("ראשית", 5, mode = SearchMode.FLEXIBLE)?.use { session ->
+                assertEquals(1, runBlocking { session.nextPage(10) }?.hits?.size)
+            }
+            engine.openSession("ראשית", 5, mode = SearchMode.EXACT)?.use { session ->
+                assertNull(runBlocking { session.nextPage(10) })
+            }
+        } finally {
+            deleteDirectory(tempDir)
+        }
+    }
+
+    @Test
     fun `openSession returns null for blank query`() {
         val tempDir = createTempIndexDir()
         try {

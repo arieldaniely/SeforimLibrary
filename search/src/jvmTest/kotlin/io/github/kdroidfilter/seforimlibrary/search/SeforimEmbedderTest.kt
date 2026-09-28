@@ -21,15 +21,15 @@ class SeforimEmbedderTest {
         }
         embedder.use { e ->
             val q = e.embed("מה מברכים על אוכל")
-            assertEquals(384, q.size, "embedding dim")
+            assertEquals(256, q.size, "embedding dim")
 
             // deterministic + normalized: same text twice -> cosine ~1
             val q2 = e.embed("מה מברכים על אוכל")
             assertTrue(cos(q, q2) > 0.999f, "self-cosine should be ~1.0")
 
             // sanity: a topically related text should be closer than an unrelated one
-            val related = e.embed("ברכת הנהנין על פירות וירקות")
-            val unrelated = e.embed("הלכות טומאה וטהרה של כלים")
+            val related = e.embed("ברכת הנהנין על פירות וירקות", SeforimEmbedder.Role.PASSAGE)
+            val unrelated = e.embed("הלכות טומאה וטהרה של כלים", SeforimEmbedder.Role.PASSAGE)
             val cr = cos(q, related)
             val cu = cos(q, unrelated)
             println("[embedder] cos(related)=$cr  cos(unrelated)=$cu")

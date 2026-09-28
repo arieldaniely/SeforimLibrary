@@ -12,7 +12,7 @@ import java.nio.file.Path
 
 /**
  * Hybrid search = lexical (BM25 + MagicDictionary, [LuceneSearchEngine]) fused with
- * dense semantic search (v4 embedding + [VectorSearcher]) via Reciprocal Rank Fusion.
+ * dense semantic search (Round 2 embedding + [VectorSearcher]) via Reciprocal Rank Fusion.
  *
  *   RRF(doc) = Σ 1/(K + rank_in_list)
  *
@@ -31,6 +31,7 @@ class HybridSearchEngine(
     private val lexical: LuceneSearchEngine,
     private val modelDir: Path?,
     private val indexDir: Path,
+    private val dbPath: Path? = null,
     private val rrfK: Int = 60,
     private val candidates: Int = 150,
     private val resolveLine: suspend (lineId: Long, bookId: Long, query: String) -> LineHit?,
@@ -48,20 +49,22 @@ class HybridSearchEngine(
 
     // Cheap, no-load check: are the model + vector index even present? Decides whether to
     // take the dense path (then load lazily); the actual OrtSession is built in fuse().
-    private val denseConfigured: Boolean =
-        Files.isDirectory(indexDir) && SeforimEmbedder.isAvailable(modelDir)
+    private val denseConfigured: Boolean
+        get() = Files.isDirectory(indexDir) && SeforimEmbedder.isAvailable(modelDir)
 
     val denseEnabled: Boolean get() = embedder != null && vectorSearcher != null
 
     /** Load the embedder + vector searcher once, on a background thread. Idempotent. */
     private suspend fun ensureDense() {
-        if (denseTried) return
+        if (denseTried && (denseEnabled || !denseConfigured)) return
         denseMutex.withLock {
-            if (denseTried) return
+            if (denseTried && (denseEnabled || !denseConfigured)) return
             withContext(Dispatchers.IO) {
                 val emb = SeforimEmbedder.tryLoad(modelDir)
                 val vs = if (emb != null && Files.isDirectory(indexDir)) {
-                    runCatching { VectorSearcher(indexDir) }.getOrNull()
+                    runCatching { VectorSearcher(indexDir, emb.dim, dbPath, modelDir) }
+                        .onFailure { logger.w(it) { "Invalid semantic index" } }
+                        .getOrNull()
                 } else null
                 if (vs != null) {
                     embedder = emb; vectorSearcher = vs
@@ -83,8 +86,12 @@ class HybridSearchEngine(
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
         baseBookOnly: Boolean,
+        mode: SearchMode,
     ): SearchSession? {
         if (query.isBlank()) return null
+        if (mode != SearchMode.SMART) {
+            return lexical.openSession(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode)
+        }
         // Dense index supports book / base-book filters only. For category/line filters
         // (or when dense isn't configured), use pure lexical to stay correct. The model
         // itself is loaded lazily in fuse() — denseConfigured is a cheap no-load check.
@@ -120,7 +127,7 @@ class HybridSearchEngine(
         return withContext(Dispatchers.Default) {
             val qVec = emb.embed(query)
             clauses
-                .map { it to cosine(qVec, emb.embed(it)) }
+                .map { it to cosine(qVec, emb.embed(it, SeforimEmbedder.Role.PASSAGE)) }
                 .maxByOrNull { it.second }
                 ?.first
         }
@@ -149,7 +156,8 @@ class HybridSearchEngine(
     override fun computeFacets(
         query: String, near: Int, bookFilter: Long?, categoryFilter: Long?,
         bookIds: Collection<Long>?, lineIds: Collection<Long>?, baseBookOnly: Boolean,
-    ): SearchFacets? = lexical.computeFacets(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
+        mode: SearchMode,
+    ): SearchFacets? = lexical.computeFacets(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode)
 
     override fun close() {
         runCatching { vectorSearcher?.close() }
@@ -312,16 +320,5 @@ class HybridSearchEngine(
         private const val WINDOW_STRIDE_WORDS = 8
         private const val SNIPPET_CONTEXT = 90 // chars of context kept on each side of the passage
 
-        fun create(
-            lexical: LuceneSearchEngine,
-            indexDir: Path,
-            modelDir: Path? = null,
-            resolveLine: suspend (Long, Long, String) -> LineHit?,
-        ): HybridSearchEngine {
-            // ONE index: dense vectors live in the SAME Lucene index as the text
-            // (seforim.db.lucene) — no separate vector index. The embedder + searcher
-            // load lazily on the first dense search (no UI freeze).
-            return HybridSearchEngine(lexical, modelDir, indexDir, resolveLine = resolveLine)
-        }
     }
 }

@@ -56,7 +56,8 @@ interface SearchEngine : Closeable {
         categoryFilter: Long? = null,
         bookIds: Collection<Long>? = null,
         lineIds: Collection<Long>? = null,
-        baseBookOnly: Boolean = false
+        baseBookOnly: Boolean = false,
+        mode: SearchMode = SearchMode.FLEXIBLE,
     ): SearchSession?
 
     /**
@@ -139,6 +140,7 @@ interface SearchEngine : Closeable {
         categoryFilter: Long? = null,
         bookIds: Collection<Long>? = null,
         lineIds: Collection<Long>? = null,
-        baseBookOnly: Boolean = false
+        baseBookOnly: Boolean = false,
+        mode: SearchMode = SearchMode.FLEXIBLE,
     ): SearchFacets?
 }
