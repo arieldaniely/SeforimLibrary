@@ -516,11 +516,12 @@ class LuceneSearchEngine(
 
         // Free (unquoted) text: dictionary-aware ranking + presence filtering.
         if (norm.isNotBlank()) {
-            val rankedQuery = if (mode == SearchMode.EXACT) buildHebrewStdQuery(norm, near) else
+            val rankedQuery = if (mode == SearchMode.EXACT) buildHebrewStdQuery(norm, 3) else
                 buildExpandedQuery(norm, near, analyzedStd, tokenExpansions)
             val mustAllTokensQuery: Query? =
                 buildPresenceFilterForTokens(analyzedStd, if (mode == SearchMode.EXACT) 0 else near, tokenExpansions)
-            val phraseQuery: Query? = buildSynonymPhraseQuery(analyzedStd, tokenExpansions, near)
+            val phraseQuery: Query? =
+                if (mode == SearchMode.EXACT) null else buildSynonymPhraseQuery(analyzedStd, tokenExpansions, near)
             if (mustAllTokensQuery != null) {
                 builder.add(mustAllTokensQuery, BooleanClause.Occur.FILTER)
                 logger.d { "[DEBUG] Added mustAllTokensQuery as FILTER" }
@@ -530,8 +531,11 @@ class LuceneSearchEngine(
                 builder.add(phraseQuery, occur)
                 logger.d { "[DEBUG] Added phraseQuery with occur=$occur, near=$near" }
             }
-            builder.add(rankedQuery, BooleanClause.Occur.SHOULD)
-            logger.d { "[DEBUG] Added rankedQuery as SHOULD" }
+            // Exact mode requires the original words within three intervening positions.
+            // A presence filter alone would also match words far apart in the same line.
+            val rankedOccur = if (mode == SearchMode.EXACT) BooleanClause.Occur.MUST else BooleanClause.Occur.SHOULD
+            builder.add(rankedQuery, rankedOccur)
+            logger.d { "[DEBUG] Added rankedQuery as $rankedOccur" }
         }
 
         val finalQuery = builder.build()

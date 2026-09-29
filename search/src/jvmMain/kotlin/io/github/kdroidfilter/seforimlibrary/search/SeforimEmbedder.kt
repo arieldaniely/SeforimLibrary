@@ -61,7 +61,9 @@ class SeforimEmbedder private constructor(
         }
         val o = OrtSession.SessionOptions().apply {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            runCatching { setIntraOpNumThreads(Runtime.getRuntime().availableProcessors()) }
+            val threads = System.getProperty("seforimEmbedThreads")?.toIntOrNull()
+                ?.takeIf { it > 0 } ?: Runtime.getRuntime().availableProcessors().coerceAtMost(4)
+            runCatching { setIntraOpNumThreads(threads) }
         }
         return env.createSession(model.toString(), o)
     }
@@ -69,8 +71,11 @@ class SeforimEmbedder private constructor(
     enum class Role(val prefix: String) { QUERY("[QUERY]"), PASSAGE("[PASSAGE]") }
 
     /** Encode a query or corpus passage using the same text contract. */
-    fun embed(text: String, role: Role = Role.QUERY): FloatArray {
-        val enc = tokenizer.encode("${role.prefix} ${Round2Normalizer.clean(text)}")
+    fun embed(text: String, role: Role = Role.QUERY): FloatArray = embedClean(Round2Normalizer.clean(text), role)
+
+    /** Encode text already cleaned by [Round2Normalizer], avoiding duplicate work while indexing. */
+    fun embedClean(cleanText: String, role: Role): FloatArray {
+        val enc = tokenizer.encode("${role.prefix} $cleanText")
         var ids = enc.ids
         var mask = enc.attentionMask
         if (ids.size > maxLen) {

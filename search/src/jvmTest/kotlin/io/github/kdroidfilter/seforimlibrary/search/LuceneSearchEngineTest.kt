@@ -138,6 +138,41 @@ class LuceneSearchEngineTest {
     }
 
     @Test
+    fun `exact mode requires words within three intervening words`() {
+        val tempDir = createTempIndexDir()
+        try {
+            FSDirectory.open(tempDir).use { dir ->
+                IndexWriter(dir, IndexWriterConfig(StandardAnalyzer())).use { writer ->
+                    listOf(
+                        "שלום עולם" to 1,
+                        "שלום אחד שנים שלשה עולם" to 2,
+                        "שלום אחד שנים שלשה ארבעה עולם" to 3,
+                    ).forEach { (text, id) ->
+                        writer.addDocument(Document().apply {
+                            add(StringField("type", "line", Field.Store.NO))
+                            add(StoredField("book_id", 1))
+                            add(StoredField("book_title", "ספר בדיקה"))
+                            add(StoredField("line_id", id))
+                            add(StoredField("line_index", id))
+                            add(TextField("text", text, Field.Store.NO))
+                            add(StoredField("text_raw", text))
+                        })
+                    }
+                }
+            }
+            LuceneSearchEngine(tempDir).use { engine ->
+                val session = assertNotNull(engine.openSession("שלום עולם", 5, mode = SearchMode.EXACT))
+                session.use {
+                    val hits = runBlocking { session.nextPage(10) }?.hits.orEmpty()
+                    assertEquals(setOf(1L, 2L), hits.map { it.lineId }.toSet())
+                }
+            }
+        } finally {
+            deleteDirectory(tempDir)
+        }
+    }
+
+    @Test
     fun `openSession returns null for blank query`() {
         val tempDir = createTempIndexDir()
         try {

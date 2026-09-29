@@ -17,7 +17,27 @@ tasks.register<JavaExec>("buildSemanticIndex") {
     argumentProviders.add(CommandLineArgumentProvider {
         listOf(db.get(), model.get(), output.get(),
             providers.gradleProperty("shardIndex").orElse("0").get(),
-            providers.gradleProperty("shardCount").orElse("1").get())
+            providers.gradleProperty("shardCount").orElse("1").get(),
+            providers.gradleProperty("semanticWorkers").orElse("1").get())
+    })
+    providers.gradleProperty("semanticThreads").orNull?.let { systemProperty("seforimEmbedThreads", it) }
+    maxHeapSize = "4g"
+}
+
+tasks.register<JavaExec>("buildSemanticIndexFromVectors") {
+    group = "application"
+    description = "Build one semantic Lucene shard from GPU-generated vector records"
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.search.BuildSemanticIndexFromVectorsKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    workingDir = rootProject.projectDir
+    val db = providers.gradleProperty("seforimDb")
+    val model = providers.gradleProperty("semanticModelDir")
+    val vectors = providers.gradleProperty("semanticVectors")
+    val output = providers.gradleProperty("semanticIndexDir")
+    argumentProviders.add(CommandLineArgumentProvider {
+        listOf(db.get(), model.get(), vectors.get(), output.get(),
+            providers.gradleProperty("shardIndex").get(), providers.gradleProperty("shardCount").get())
     })
     maxHeapSize = "4g"
 }
