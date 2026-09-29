@@ -30,7 +30,7 @@ tasks.register<JavaExec>("buildSemanticIndexFromVectors") {
     dependsOn("jvmJar")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.search.BuildSemanticIndexFromVectorsKt")
     classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
-    workingDir = rootProject.projectDir
+    workingDir = layout.projectDirectory.asFile
     val db = providers.gradleProperty("seforimDb")
     val model = providers.gradleProperty("semanticModelDir")
     val vectors = providers.gradleProperty("semanticVectors")

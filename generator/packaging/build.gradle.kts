@@ -28,7 +28,7 @@ kotlin {
 tasks.register<JavaExec>("packageSemanticBundle") {
     group = "application"
     description = "Package a complete local Round 2 index and model as tar.zst, splitting only when needed"
-    workingDir = rootProject.projectDir
+    workingDir = layout.projectDirectory.asFile
     dependsOn("jvmJar")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.PackageSemanticBundleKt")
     classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
