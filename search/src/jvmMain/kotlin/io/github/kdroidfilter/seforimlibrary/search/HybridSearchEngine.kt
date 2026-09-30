@@ -1,7 +1,13 @@
 package io.github.kdroidfilter.seforimlibrary.search
 
 import co.touchlab.kermit.Logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -97,7 +103,11 @@ class HybridSearchEngine(
         // itself is loaded lazily in fuse() — denseConfigured is a cheap no-load check.
         val denseOk = denseConfigured && categoryFilter == null && lineIds == null
         if (!denseOk) {
-            return lexical.openSession(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
+            val session = lexical.openSession(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
+                ?: return null
+            return object : SearchSession by session {
+                override val effectiveMode: SearchMode = SearchMode.FLEXIBLE
+            }
         }
         val effBookIds = bookIds ?: bookFilter?.let { listOf(it) }
         return HybridSession(query, near, effBookIds, baseBookOnly)
@@ -122,13 +132,20 @@ class HybridSearchEngine(
         if (query.isBlank() || text.isBlank()) return null
         ensureDense()
         val emb = embedder ?: return null
+        return withContext(Dispatchers.Default) {
+            semanticSpan(emb, emb.embed(query), text)
+        }
+    }
+
+    private suspend fun semanticSpan(emb: SeforimEmbedder, qVec: FloatArray, text: String): String? {
         val clauses = splitClauses(text)
         if (clauses.size < 2) return null
         return withContext(Dispatchers.Default) {
-            val qVec = emb.embed(query)
             clauses
-                .map { it to cosine(qVec, emb.embed(it, SeforimEmbedder.Role.PASSAGE)) }
-                .maxByOrNull { it.second }
+                .map {
+                    currentCoroutineContext().ensureActive()
+                    it to cosine(qVec, emb.embed(it, SeforimEmbedder.Role.PASSAGE))
+                }.maxByOrNull { it.second }
                 ?.first
         }
     }
@@ -166,8 +183,12 @@ class HybridSearchEngine(
     }
 
     /** The fused, RRF-ordered hits plus the ids that the lexical path matched (so the dense-only
-     *  ones can get a meaning-based snippet lazily — their lexical snippet is meaningless). */
-    private class FusedResult(val hits: List<LineHit>, val lexicalIds: Set<Long>)
+     *  ones can get a meaning-based snippet in the background). */
+    private class FusedResult(
+        val hits: List<LineHit>,
+        val lexicalIds: Set<Long>,
+        val queryVector: FloatArray? = null,
+    )
 
     /** Lexical page + dense KNN, fused by RRF, resolved to full LineHits. */
     private suspend fun fuse(query: String, near: Int, bookIds: Collection<Long>?, baseOnly: Boolean): FusedResult {
@@ -182,11 +203,15 @@ class HybridSearchEngine(
 
         // Don't let a dense failure sink the whole search: degrade to lexical and log. This
         // also catches native-image gaps (e.g. a missing Lucene KNN vectors-format SPI entry).
+        var queryVector: FloatArray? = null
         val denseHits = try {
             withContext(Dispatchers.Default) {
                 val qVec = emb.embed(query)
+                queryVector = qVec
                 vs.search(qVec, candidates, baseOnly, bookIds)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             logger.w(e) { "dense KNN failed; falling back to lexical-only" }
             return FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
@@ -207,7 +232,7 @@ class HybridSearchEngine(
             val hit = lexById[lineId] ?: resolveLine(lineId, bookOf[lineId] ?: -1L, query)
             if (hit != null) out += hit.copy(score = score.toFloat())
         }
-        return FusedResult(out, lexById.keys)
+        return FusedResult(out, lexById.keys, queryVector)
     }
 
     /**
@@ -216,11 +241,12 @@ class HybridSearchEngine(
      * function words (ואם, או…) get highlighted on their own. Instead, locate the passage closest
      * in meaning and bold it as ONE contiguous span inside a context window. Null -> keep lexical.
      */
-    private suspend fun semanticSnippet(query: String, rawText: String, near: Int): String? {
+    private suspend fun semanticSnippet(queryVector: FloatArray, rawText: String, near: Int): String? {
         // Jsoup.clean returns HTML-escaped text; substrings stay escaped, so we splice <b> in
         // directly (same convention as the lexical snippet builder).
         val clean = Jsoup.clean(rawText, Safelist.none())
-        val passage = semanticSpan(query, clean) ?: return null
+        val emb = embedder ?: return null
+        val passage = semanticSpan(emb, queryVector, clean) ?: return null
         val idx = clean.indexOf(passage)
         if (idx < 0) return lexical.buildSnippet(rawText, passage, near)
         val from = (idx - SNIPPET_CONTEXT).coerceAtLeast(0)
@@ -240,25 +266,40 @@ class HybridSearchEngine(
         private val bookIds: Collection<Long>?,
         private val baseOnly: Boolean,
     ) : SearchSession {
+        override var effectiveMode: SearchMode = SearchMode.SMART
+            private set
         private var fused: FusedResult? = null
         private var offset = 0
 
         override suspend fun nextPage(limit: Int): SearchPage? {
             val all = fused ?: fuse(query, near, bookIds, baseOnly).also { fused = it }
+            effectiveMode = if (all.queryVector != null) SearchMode.SMART else SearchMode.FLEXIBLE
             if (offset >= all.hits.size) return null
             val end = minOf(offset + limit, all.hits.size)
-            // Re-snippet only the dense-only hits on THIS page (bounded work) so semantic
-            // results show the passage that actually matched, not the line's opening words.
-            val slice = all.hits.subList(offset, end).map { hit ->
-                if (hit.lineId in all.lexicalIds) {
-                    hit
-                } else {
-                    semanticSnippet(query, hit.rawText, near)?.let { hit.copy(snippet = it) } ?: hit
-                }
-            }
+            // Return the existing snippets immediately; semantic localization is opt-in background work.
+            val slice = all.hits.subList(offset, end).toList()
             offset = end
             return SearchPage(hits = slice, totalHits = all.hits.size.toLong(), isLastPage = offset >= all.hits.size)
         }
+
+        override fun highlightUpdates(hits: List<LineHit>): Flow<LineHit> = flow {
+            val all = fused ?: return@flow
+            val queryVector = all.queryVector ?: return@flow
+            val denseIds = all.hits.asSequence().map { it.lineId }.toSet() - all.lexicalIds
+            for (hit in hits) {
+                currentCoroutineContext().ensureActive()
+                if (hit.lineId !in denseIds) continue
+                val snippet = try {
+                    semanticSnippet(queryVector, hit.rawText, near)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logger.w(e) { "Semantic snippet failed for line ${hit.lineId}" }
+                    null
+                }
+                if (snippet != null) emit(hit.copy(snippet = snippet))
+            }
+        }.flowOn(Dispatchers.Default)
 
         override fun close() {}
     }

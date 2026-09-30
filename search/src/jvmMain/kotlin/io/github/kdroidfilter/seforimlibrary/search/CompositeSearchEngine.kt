@@ -2,6 +2,8 @@ package io.github.kdroidfilter.seforimlibrary.search
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.merge
 import java.util.ArrayDeque
 
 /**
@@ -101,6 +103,7 @@ private class MergedSearchSession(
     private val first: SearchSession,
     private val second: SearchSession,
 ) : SearchSession {
+    override val effectiveMode: SearchMode? get() = first.effectiveMode
     private val firstBuffer = ArrayDeque<LineHit>()
     private val secondBuffer = ArrayDeque<LineHit>()
     private var firstFinished = false
@@ -135,6 +138,9 @@ private class MergedSearchSession(
         firstFill.await()
         secondFill.await()
     }
+
+    override fun highlightUpdates(hits: List<LineHit>): Flow<LineHit> =
+        merge(first.highlightUpdates(hits), second.highlightUpdates(hits))
 
     private suspend fun fill(
         session: SearchSession,
