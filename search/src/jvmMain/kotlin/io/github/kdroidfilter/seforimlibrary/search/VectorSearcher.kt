@@ -21,7 +21,7 @@ import java.util.Properties
 data class DenseHit(val lineId: Long, val bookId: Long, val score: Float)
 
 /**
- * Runs filtered KNN over independently downloadable semantic index shards.
+ * Runs filtered KNN over a unified semantic index, with support for legacy sharded bundles.
  *
  * Returns line ids that are joined back to the DB by the caller.
  */
@@ -42,6 +42,8 @@ class VectorSearcher(
         if (System.getProperty("org.graalvm.nativeimage.imagecode") != null) NIOFSDirectory(path)
         else FSDirectory.open(path)
     }
+    private val readers = mutableListOf<DirectoryReader>()
+    private val searchers: List<IndexSearcher>
     private val byteVectors: Boolean
 
     init {
@@ -81,18 +83,20 @@ class VectorSearcher(
                 }
             }
             dirs.forEach { dir ->
-                DirectoryReader.open(dir).use { reader ->
-                    val field = FieldInfos.getMergedFieldInfos(reader).fieldInfo("vec")
-                    val dimension = field?.vectorDimension
-                    require(dimension == expectedDim) {
-                        "Semantic index has dimension $dimension; expected $expectedDim"
-                    }
-                    require(field.vectorEncoding == if (byteVectors) VectorEncoding.BYTE else VectorEncoding.FLOAT32) {
-                        "Semantic index vector encoding does not match its manifest"
-                    }
+                val reader = DirectoryReader.open(dir)
+                readers.add(reader)
+                val field = FieldInfos.getMergedFieldInfos(reader).fieldInfo("vec")
+                val dimension = field?.vectorDimension
+                require(dimension == expectedDim) {
+                    "Semantic index has dimension $dimension; expected $expectedDim"
+                }
+                require(field.vectorEncoding == if (byteVectors) VectorEncoding.BYTE else VectorEncoding.FLOAT32) {
+                    "Semantic index vector encoding does not match its manifest"
                 }
             }
+            searchers = readers.map { IndexSearcher(it) }
         } catch (failure: Throwable) {
+            readers.forEach { runCatching { it.close() } }
             dirs.forEach { runCatching { it.close() } }
             throw failure
         }
@@ -113,25 +117,29 @@ class VectorSearcher(
 
     fun search(query: FloatArray, k: Int, baseBookOnly: Boolean = false, bookIds: Collection<Long>? = null): List<DenseHit> {
         val byteQuery = if (byteVectors) Int8Vectors.quantize(query) else null
-        return dirs.flatMap { dir ->
-            DirectoryReader.open(dir).use { reader ->
-                val searcher = IndexSearcher(reader)
-                val filter = filterQuery(baseBookOnly, bookIds)
-                val knn: Query = if (byteQuery != null) KnnByteVectorQuery("vec", byteQuery, k, filter)
-                    else KnnFloatVectorQuery("vec", query, k, filter)
-                val top = searcher.search(knn, k)
-                val stored = searcher.storedFields()
-                top.scoreDocs.map { sd ->
-                    val d = stored.document(sd.doc)
-                    DenseHit(
-                        lineId = d.getField("line_id").numericValue().toLong(),
-                        bookId = d.getField("book_id").numericValue().toLong(),
-                        score = sd.score,
-                    )
-                }
+        val filter = filterQuery(baseBookOnly, bookIds)
+        return searchers.flatMap { searcher ->
+            val knn: Query = if (byteQuery != null) KnnByteVectorQuery("vec", byteQuery, k, filter)
+                else KnnFloatVectorQuery("vec", query, k, filter)
+            val top = searcher.search(knn, k)
+            // StoredFields is not thread-safe; obtain one for each query.
+            val stored = searcher.storedFields()
+            top.scoreDocs.map { sd ->
+                val d = stored.document(sd.doc)
+                DenseHit(
+                    lineId = d.getField("line_id").numericValue().toLong(),
+                    bookId = d.getField("book_id").numericValue().toLong(),
+                    score = sd.score,
+                )
             }
         }.sortedByDescending { it.score }.take(k)
     }
 
-    override fun close() { dirs.forEach { it.close() } }
+    override fun close() {
+        try {
+            readers.forEach { it.close() }
+        } finally {
+            dirs.forEach { it.close() }
+        }
+    }
 }
