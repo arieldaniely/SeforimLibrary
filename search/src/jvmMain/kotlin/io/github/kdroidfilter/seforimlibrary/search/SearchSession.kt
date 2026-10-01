@@ -1,5 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.search
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import java.io.Closeable
 
 /**
@@ -27,6 +29,9 @@ import java.io.Closeable
  * @see SearchPage for the structure of returned pages
  */
 interface SearchSession : Closeable {
+    /** Effective mode after loading a page; null when the engine does not report it. */
+    val effectiveMode: SearchMode? get() = null
+
     /**
      * Retrieves the next page of search results.
      *
@@ -37,6 +42,13 @@ interface SearchSession : Closeable {
      * @return [SearchPage] containing hits and metadata, or null if no more results
      */
     suspend fun nextPage(limit: Int): SearchPage?
+
+    /**
+     * Computes optional semantic snippets after [hits] have been displayed, emitting each
+     * updated hit as soon as it is ready. Does not advance the pagination cursor. Collection
+     * is cancellable and may run alongside [nextPage]; engines without enrichment emit nothing.
+     */
+    fun highlightUpdates(hits: List<LineHit>): Flow<LineHit> = emptyFlow()
 }
 
 /**

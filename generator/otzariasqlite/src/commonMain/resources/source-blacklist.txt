@@ -1,2 +1,6 @@
 sefariaToOtzaria
+# אוצר הספרים היהודי השיתופי: שם המקור הישן והשם הנוכחי במניפסט.
 wiki_jewish_books
+wikiJewishBooksToOtzaria
+# תא שמע: חסימת כל ספרי המקור.
+tashmaToOtzaria

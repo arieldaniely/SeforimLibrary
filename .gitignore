@@ -21,3 +21,9 @@ repomix-output.xml
 *.db.bak
 *.db-shm
 *.db-wal
+.codex-local-build/
+.codex-local-project-cache/
+.codex-validation-project-cache/
+**/.codex-local-build/
+**/.codex-validation-build/
+**/.codex-app-validation-build/

@@ -161,9 +161,10 @@ class LuceneSearchEngine(
         categoryFilter: Long?,
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
-        baseBookOnly: Boolean
+        baseBookOnly: Boolean,
+        mode: SearchMode,
     ): SearchSession? {
-        val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly) ?: return null
+        val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode) ?: return null
         val reader = DirectoryReader.open(dir)
         return LuceneSearchSession(context.query, context.anchorTerms, context.highlightTerms, reader)
     }
@@ -276,9 +277,10 @@ class LuceneSearchEngine(
         categoryFilter: Long?,
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
-        baseBookOnly: Boolean
+        baseBookOnly: Boolean,
+        mode: SearchMode,
     ): SearchFacets? {
-        val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
+        val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode)
             ?: return null
 
         return withSearcher { searcher ->
@@ -398,7 +400,8 @@ class LuceneSearchEngine(
         categoryFilter: Long?,
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
-        baseBookOnly: Boolean = false
+        baseBookOnly: Boolean = false,
+        mode: SearchMode = SearchMode.FLEXIBLE,
     ): SearchContext? {
         // Split the raw query into exact phrases (wrapped in ASCII double quotes) and free text.
         // Quoted segments are matched verbatim WITHOUT dictionary expansion (Google-style).
@@ -436,6 +439,7 @@ class LuceneSearchEngine(
         // These expansions are used for SEARCH - we keep all of them for better recall
         val tokenExpansions: Map<String, List<MagicDictionaryIndex.Expansion>> =
             analyzedStd.associateWith { token ->
+                if (mode == SearchMode.EXACT) return@associateWith emptyList()
                 // Get best expansion (prefers matching base, then largest)
                 val expansion = magicDict?.expansionFor(token) ?: return@associateWith emptyList()
                 listOf(expansion)
@@ -467,12 +471,12 @@ class LuceneSearchEngine(
             .distinct()
         // Add 4-gram terms used in the query (matches text_ng4 clauses) so highlighting can
         // reflect matches that were found via the n-gram branch.
-        val ngramTerms = buildNgramTerms(analyzedStd, gram = 4)
+        val ngramTerms = if (mode == SearchMode.EXACT) emptyList() else buildNgramTerms(analyzedStd, gram = 4)
         // For highlighting/snippets, use the actual query tokens plus the concrete
         // terms that the search query uses (expansions + n-grams), and if the query
         // mentions Hashem explicitly, also include dictionary-based variants of the
         // divine name from the lexical DB
-        val hashemTerms = if (hasHashem) loadHashemHighlightTerms() else emptyList()
+        val hashemTerms = if (hasHashem && mode != SearchMode.EXACT) loadHashemHighlightTerms() else emptyList()
         // Verbatim tokens from the quoted phrases must be highlighted too (no expansion).
         val exactPhraseTokens = exactPhrasesNorm.flatMap { analyzeToTerms(stdAnalyzer, it) ?: emptyList() }
         val highlightTerms = filterTermsForHighlight(
@@ -512,9 +516,12 @@ class LuceneSearchEngine(
 
         // Free (unquoted) text: dictionary-aware ranking + presence filtering.
         if (norm.isNotBlank()) {
-            val rankedQuery = buildExpandedQuery(norm, near, analyzedStd, tokenExpansions)
-            val mustAllTokensQuery: Query? = buildPresenceFilterForTokens(analyzedStd, near, tokenExpansions)
-            val phraseQuery: Query? = buildSynonymPhraseQuery(analyzedStd, tokenExpansions, near)
+            val rankedQuery = if (mode == SearchMode.EXACT) buildHebrewStdQuery(norm, 3) else
+                buildExpandedQuery(norm, near, analyzedStd, tokenExpansions)
+            val mustAllTokensQuery: Query? =
+                buildPresenceFilterForTokens(analyzedStd, if (mode == SearchMode.EXACT) 0 else near, tokenExpansions)
+            val phraseQuery: Query? =
+                if (mode == SearchMode.EXACT) null else buildSynonymPhraseQuery(analyzedStd, tokenExpansions, near)
             if (mustAllTokensQuery != null) {
                 builder.add(mustAllTokensQuery, BooleanClause.Occur.FILTER)
                 logger.d { "[DEBUG] Added mustAllTokensQuery as FILTER" }
@@ -524,8 +531,11 @@ class LuceneSearchEngine(
                 builder.add(phraseQuery, occur)
                 logger.d { "[DEBUG] Added phraseQuery with occur=$occur, near=$near" }
             }
-            builder.add(rankedQuery, BooleanClause.Occur.SHOULD)
-            logger.d { "[DEBUG] Added rankedQuery as SHOULD" }
+            // Exact mode requires the original words within three intervening positions.
+            // A presence filter alone would also match words far apart in the same line.
+            val rankedOccur = if (mode == SearchMode.EXACT) BooleanClause.Occur.MUST else BooleanClause.Occur.SHOULD
+            builder.add(rankedQuery, rankedOccur)
+            logger.d { "[DEBUG] Added rankedQuery as $rankedOccur" }
         }
 
         val finalQuery = builder.build()

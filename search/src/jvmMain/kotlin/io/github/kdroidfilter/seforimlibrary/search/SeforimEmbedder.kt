@@ -10,15 +10,14 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * Produces L2-normalized 384-d sentence embeddings for Hebrew/Aramaic text on the JVM,
- * using the v5 model trained in the SeforimEmbedding project (ONNX export).
+ * Produces L2-normalized 256-d Round 2 embeddings for Hebrew/Aramaic text on the JVM.
  *
  * The ONNX graph bakes in pooling + projection + L2 normalization, so [embed] returns
- * a vector ready for a Lucene `KnnFloatVectorField` (cosine). Query text is normalized
- * with [HebrewV5Normalizer] to match the training distribution.
+ * a float vector quantized by [Int8Vectors] for Lucene byte-vector cosine search. Query text is normalized
+ * with [Round2Normalizer] to match the training distribution.
  *
  * Model artifacts (from the SeforimEmbedding release):
- *  - `seforim-embed-v5-int8.onnx`  (the model)
+ *  - `seforim-embed-round2-int8.onnx`  (the model)
  *  - `tokenizer.json`              (the matching tokenizer)
  * Place both in a directory and point to it via `-DseforimEmbedModelDir=…`,
  * the `SEFORIM_EMBED_MODEL` env var, or one of the default candidate locations.
@@ -27,10 +26,10 @@ import java.nio.file.Path
 class SeforimEmbedder private constructor(
     onnxModel: Path,
     tokenizerJson: Path,
-    private val maxLen: Int = 128,
+    private val maxLen: Int = 256,
 ) : Closeable {
 
-    val dim: Int = 384
+    val dim: Int = 256
 
     private val tokenizer: HuggingFaceTokenizer = HuggingFaceTokenizer.newInstance(tokenizerJson)
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
@@ -62,18 +61,21 @@ class SeforimEmbedder private constructor(
         }
         val o = OrtSession.SessionOptions().apply {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            runCatching { setIntraOpNumThreads(Runtime.getRuntime().availableProcessors()) }
+            val threads = System.getProperty("seforimEmbedThreads")?.toIntOrNull()
+                ?.takeIf { it > 0 } ?: Runtime.getRuntime().availableProcessors().coerceAtMost(4)
+            runCatching { setIntraOpNumThreads(threads) }
         }
         return env.createSession(model.toString(), o)
     }
 
-    // v5 models were trained on final-folded text; queries must be normalized
-    // the same way so query and indexed vectors stay comparable.
-    private val normalize: (String) -> String = HebrewV5Normalizer::clean
+    enum class Role(val prefix: String) { QUERY("[QUERY]"), PASSAGE("[PASSAGE]") }
 
-    /** Embed a single text (normalized like the corpus) into a normalized float[dim]. */
-    fun embed(text: String): FloatArray {
-        val enc = tokenizer.encode(normalize(text))
+    /** Encode a query or corpus passage using the same text contract. */
+    fun embed(text: String, role: Role = Role.QUERY): FloatArray = embedClean(Round2Normalizer.clean(text), role)
+
+    /** Encode text already cleaned by [Round2Normalizer], avoiding duplicate work while indexing. */
+    fun embedClean(cleanText: String, role: Role): FloatArray {
+        val enc = tokenizer.encode("${role.prefix} $cleanText")
         var ids = enc.ids
         var mask = enc.attentionMask
         if (ids.size > maxLen) {
@@ -84,7 +86,11 @@ class SeforimEmbedder private constructor(
             OnnxTensor.createTensor(env, arrayOf(mask)).use { maskT ->
                 session.run(mapOf("input_ids" to idsT, "attention_mask" to maskT)).use { res ->
                     @Suppress("UNCHECKED_CAST")
-                    return (res[0].value as Array<FloatArray>)[0]
+                    return (res[0].value as Array<FloatArray>)[0].also { vector ->
+                        require(vector.size == dim && vector.all { it.isFinite() }) {
+                            "Round 2 model returned an invalid embedding"
+                        }
+                    }
                 }
             }
         }
@@ -92,7 +98,6 @@ class SeforimEmbedder private constructor(
 
     override fun close() {
         session.close()
-        env.close()
         tokenizer.close()
     }
 
@@ -107,7 +112,6 @@ class SeforimEmbedder private constructor(
             explicitDir,
             System.getProperty("seforimEmbedModelDir")?.let { Path.of(it) },
             System.getenv("SEFORIM_EMBED_MODEL")?.let { Path.of(it) },
-            Path.of(System.getProperty("user.home"), "IdeaProjects/SeforimEmbedding/artifacts"),
         ).distinct()
 
         /** Cheap presence check (model + tokenizer files) WITHOUT creating the heavy
@@ -129,18 +133,12 @@ class SeforimEmbedder private constructor(
             return null
         }
 
-        // Prefer the newest model and the int8-quantized variant (4x smaller, ~3x
-        // faster CPU embedding) when present. v5 models fold final letters; the
-        // matching normalization is selected automatically from the filename.
+        // Only accept Round 2 artifacts. A model with another tokenizer or dimension
+        // cannot safely query an index built from this checkpoint.
         private fun findOnnx(dir: Path): Path? = listOf(
-            "seforim-embed-v5-int8.onnx", "seforim-embed-v5.onnx",
-            "seforim-embed-v4-int8.onnx", "model.onnx", "seforim-embed-v4.onnx",
+            "seforim-embed-round2-int8.onnx", "seforim-embed-round2-fp32.onnx",
         ).map { dir.resolve(it) }.firstOrNull { Files.isRegularFile(it) }
 
-        private fun findTokenizer(dir: Path): Path? = listOf(
-            dir.resolve("tokenizer.json"),
-            dir.resolve("tokenizer_v4/tokenizer.json"),
-            dir.resolve("model_v4_phase2a/tokenizer.json"),
-        ).firstOrNull { Files.isRegularFile(it) }
+        private fun findTokenizer(dir: Path): Path? = dir.resolve("tokenizer.json").takeIf { Files.isRegularFile(it) }
     }
 }

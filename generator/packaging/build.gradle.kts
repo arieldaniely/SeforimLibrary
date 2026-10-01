@@ -18,10 +18,29 @@ kotlin {
 
         jvmMain.dependencies {
             implementation(project(":generator-common"))
+            implementation(project(":search"))
             implementation(libs.zstd)
             implementation(libs.commons.compress)
         }
     }
+}
+
+tasks.register<JavaExec>("packageSemanticBundle") {
+    group = "application"
+    description = "Package a complete local Round 2 index and model as tar.zst, splitting only when needed"
+    workingDir = layout.projectDirectory.asFile
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.PackageSemanticBundleKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val db = providers.gradleProperty("seforimDb").orElse(providers.environmentVariable("SEFORIM_DB"))
+    val model = providers.gradleProperty("semanticModelDir")
+    val index = providers.gradleProperty("semanticIndexDir")
+    val output = providers.gradleProperty("semanticBundleOutput")
+    argumentProviders.add(org.gradle.process.CommandLineArgumentProvider {
+        listOf(db.get(), model.get(), index.get(), output.get(),
+            providers.gradleProperty("splitPartBytes").orElse("2040109465").get())
+    })
+    maxHeapSize = "2g"
 }
 
 // Write release information to release_info.txt file
@@ -80,37 +99,12 @@ tasks.register<JavaExec>("downloadLexicalDb") {
     jvmArgs = listOf("-Xmx512m")
 }
 
-// Download the dense embedding model (int8 ONNX + tokenizer) from the private
-// SeforimEmbedding v4-int8 release next to seforim.db, so it gets bundled.
-// Needs GITHUB_TOKEN/GH_TOKEN; fails soft (bundle without model) if unavailable.
-// Usage:
-//   GITHUB_TOKEN=… ./gradlew :packaging:downloadEmbedModel
-tasks.register<JavaExec>("downloadEmbedModel") {
-    group = "application"
-    description = "Download int8 embedding model + tokenizer from the private v4-int8 release next to seforim.db."
-
-    dependsOn("jvmJar")
-    mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.DownloadEmbedModelKt")
-    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
-
-    if (project.hasProperty("seforimDb")) {
-        systemProperty("seforimDb", project.property("seforimDb") as String)
-    } else if (System.getenv("SEFORIM_DB") != null) {
-        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
-    } else {
-        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
-        systemProperty("seforimDb", defaultDbPath)
-    }
-
-    jvmArgs = listOf("-Xmx256m")
-}
-
 // Package DB + Lucene indexes into single tar.zst and split
 tasks.register<JavaExec>("packageArtifacts") {
     group = "application"
     description = "Create seforim_bundle.tar.zst (DB + indexes + release info) with zstd and split into ~1.9GiB parts."
 
-    dependsOn("jvmJar", "writeReleaseInfo", "downloadLexicalDb", "downloadEmbedModel")
+    dependsOn("jvmJar", "writeReleaseInfo", "downloadLexicalDb")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.PackageArtifactsKt")
     classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
 

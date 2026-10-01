@@ -2,36 +2,101 @@ package io.github.kdroidfilter.seforimlibrary.search
 
 import org.apache.lucene.document.IntPoint
 import org.apache.lucene.index.DirectoryReader
+import org.apache.lucene.index.FieldInfos
+import org.apache.lucene.index.VectorEncoding
 import org.apache.lucene.search.BooleanClause
 import org.apache.lucene.search.BooleanQuery
 import org.apache.lucene.search.IndexSearcher
 import org.apache.lucene.search.KnnFloatVectorQuery
+import org.apache.lucene.search.KnnByteVectorQuery
 import org.apache.lucene.search.Query
 import org.apache.lucene.store.FSDirectory
 import org.apache.lucene.store.NIOFSDirectory
 import java.io.Closeable
+import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Properties
 
-/** A dense (semantic) hit from the fused Lucene index. */
+/** A dense semantic hit. */
 data class DenseHit(val lineId: Long, val bookId: Long, val score: Float)
 
 /**
- * Runs a filtered KNN query over the SINGLE fused Lucene index (text fields +
- * dense `KnnFloatVectorField` per line, built by the generator's text index
- * writer). Filters (base-books / specific books) are applied as a pre-filter so
- * the KNN only considers eligible documents.
+ * Runs filtered KNN over independently downloadable semantic index shards.
  *
  * Returns line ids that are joined back to the DB by the caller.
  */
-class VectorSearcher(indexDir: Path) : Closeable {
+class VectorSearcher(
+    indexDir: Path,
+    expectedDim: Int = 256,
+    dbPath: Path? = null,
+    modelDir: Path? = null,
+) : Closeable {
     // GraalVM native image can't instantiate MMapDirectory's MemorySegmentIndexInputProvider
     // (Panama foreign downcalls) — use NIOFSDirectory there, like LuceneSearchEngine does.
-    private val dir =
-        if (System.getProperty("org.graalvm.nativeimage.imagecode") != null) {
-            NIOFSDirectory(indexDir)
-        } else {
-            FSDirectory.open(indexDir)
+    private val shardPaths = Files.list(indexDir).use { stream ->
+        stream.filter { Files.isDirectory(it) && it.fileName.toString().startsWith("shard-") }
+            .sorted()
+            .toList()
+    }
+    private val dirs = shardPaths.map { path ->
+        if (System.getProperty("org.graalvm.nativeimage.imagecode") != null) NIOFSDirectory(path)
+        else FSDirectory.open(path)
+    }
+    private val byteVectors: Boolean
+
+    init {
+        try {
+            require(dirs.isNotEmpty()) { "No semantic index shards in $indexDir" }
+            val manifests = shardPaths.map { path ->
+                Properties().apply {
+                    Files.newInputStream(path.resolve("semantic.properties")).use { load(it) }
+                }
+            }
+            val first = manifests.first()
+            val encoding = first.getProperty("vectorEncoding", "float32")
+            require(encoding == "float32" || encoding == Int8Vectors.ENCODING) { "Unknown vector encoding: $encoding" }
+            byteVectors = encoding == Int8Vectors.ENCODING
+            val shardCount = first.getProperty("shardCount")?.toIntOrNull()
+            require(first.getProperty("format") == "zayit-round2-1" && shardCount == dirs.size)
+            require(manifests.map { it.getProperty("shardIndex")?.toIntOrNull() }.toSet() ==
+                (0 until dirs.size).toSet()) { "Missing semantic index shard" }
+            require(manifests.all {
+                it.getProperty("format") == first.getProperty("format") &&
+                    it.getProperty("vectorEncoding", "float32") == encoding &&
+                    it.getProperty("databaseSha256") == first.getProperty("databaseSha256") &&
+                    it.getProperty("modelSha256") == first.getProperty("modelSha256") &&
+                    it.getProperty("tokenizerSha256") == first.getProperty("tokenizerSha256") &&
+                    it.getProperty("dimension") == expectedDim.toString() &&
+                    it.getProperty("indexed") == it.getProperty("eligible")
+            }) { "Inconsistent semantic index shards" }
+            if (dbPath != null) require(sha256(dbPath) == first.getProperty("databaseSha256")) {
+                "Semantic index belongs to a different database"
+            }
+            if (modelDir != null) {
+                require(sha256(modelDir.resolve("seforim-embed-round2-int8.onnx")) == first.getProperty("modelSha256")) {
+                    "Semantic index belongs to a different model"
+                }
+                require(sha256(modelDir.resolve("tokenizer.json")) == first.getProperty("tokenizerSha256")) {
+                    "Semantic index belongs to a different tokenizer"
+                }
+            }
+            dirs.forEach { dir ->
+                DirectoryReader.open(dir).use { reader ->
+                    val field = FieldInfos.getMergedFieldInfos(reader).fieldInfo("vec")
+                    val dimension = field?.vectorDimension
+                    require(dimension == expectedDim) {
+                        "Semantic index has dimension $dimension; expected $expectedDim"
+                    }
+                    require(field.vectorEncoding == if (byteVectors) VectorEncoding.BYTE else VectorEncoding.FLOAT32) {
+                        "Semantic index vector encoding does not match its manifest"
+                    }
+                }
+            }
+        } catch (failure: Throwable) {
+            dirs.forEach { runCatching { it.close() } }
+            throw failure
         }
+    }
 
     private fun filterQuery(baseBookOnly: Boolean, bookIds: Collection<Long>?): Query? {
         val b = BooleanQuery.Builder()
@@ -47,21 +112,26 @@ class VectorSearcher(indexDir: Path) : Closeable {
     }
 
     fun search(query: FloatArray, k: Int, baseBookOnly: Boolean = false, bookIds: Collection<Long>? = null): List<DenseHit> {
-        DirectoryReader.open(dir).use { reader ->
-            val searcher = IndexSearcher(reader)
-            val knn = KnnFloatVectorQuery("vec", query, k, filterQuery(baseBookOnly, bookIds))
-            val top = searcher.search(knn, k)
-            val stored = searcher.storedFields()
-            return top.scoreDocs.map { sd ->
-                val d = stored.document(sd.doc)
-                DenseHit(
-                    lineId = d.getField("line_id").numericValue().toLong(),
-                    bookId = d.getField("book_id").numericValue().toLong(),
-                    score = sd.score,
-                )
+        val byteQuery = if (byteVectors) Int8Vectors.quantize(query) else null
+        return dirs.flatMap { dir ->
+            DirectoryReader.open(dir).use { reader ->
+                val searcher = IndexSearcher(reader)
+                val filter = filterQuery(baseBookOnly, bookIds)
+                val knn: Query = if (byteQuery != null) KnnByteVectorQuery("vec", byteQuery, k, filter)
+                    else KnnFloatVectorQuery("vec", query, k, filter)
+                val top = searcher.search(knn, k)
+                val stored = searcher.storedFields()
+                top.scoreDocs.map { sd ->
+                    val d = stored.document(sd.doc)
+                    DenseHit(
+                        lineId = d.getField("line_id").numericValue().toLong(),
+                        bookId = d.getField("book_id").numericValue().toLong(),
+                        score = sd.score,
+                    )
+                }
             }
-        }
+        }.sortedByDescending { it.score }.take(k)
     }
 
-    override fun close() = dir.close()
+    override fun close() { dirs.forEach { it.close() } }
 }

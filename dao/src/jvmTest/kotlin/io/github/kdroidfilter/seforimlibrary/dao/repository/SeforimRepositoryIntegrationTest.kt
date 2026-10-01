@@ -6,6 +6,7 @@ import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkLoadLevel
 import io.github.kdroidfilter.seforimlibrary.core.models.TocEntry
 import kotlinx.coroutines.runBlocking
 import kotlin.test.AfterTest
@@ -543,23 +544,25 @@ class SeforimRepositoryIntegrationTest {
 
         repository.insertLink(
             Link(
-                sourceBookId = verseBookId,
-                targetBookId = gemaraBookId,
-                sourceLineId = verseLineId,
-                targetLineId = gemaraLineId,
+                sourceBookId = gemaraBookId,
+                targetBookId = verseBookId,
+                sourceLineId = gemaraLineId,
+                targetLineId = verseLineId,
                 targetLineIndex = 0,
                 connectionType = ConnectionType.REFERENCE,
             )
         )
 
-        // From Gemara line (target side), the Verse is a SOURCE.
-        val gemaraSources = repository.getSourceSummariesForLines(listOf(gemaraLineId))
+        // From the citing Gemara line, the Verse is a SOURCE.
+        val gemaraSources =
+            repository.getSourceSummariesForLines(listOf(gemaraLineId), LinkLoadLevel.FOCUSED)
         assertEquals(1, gemaraSources.size)
         assertEquals(verseBookId, gemaraSources.first().link.targetBookId)
         assertEquals(ConnectionType.SOURCE, gemaraSources.first().link.connectionType)
 
-        // From Verse line (source side), the Gemara is a MENTION.
-        val verseMentions = repository.getMentionSummariesForLines(listOf(verseLineId))
+        // From the cited Verse line, the Gemara is a MENTION.
+        val verseMentions =
+            repository.getMentionSummariesForLines(listOf(verseLineId), LinkLoadLevel.FOCUSED)
         assertEquals(1, verseMentions.size)
         assertEquals(gemaraBookId, verseMentions.first().link.targetBookId)
         assertEquals(ConnectionType.MENTION, verseMentions.first().link.connectionType)
