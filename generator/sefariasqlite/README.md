@@ -478,6 +478,20 @@ These enable efficient queries like:
 
 ## Usage
 
+### Incremental Otzaria ZIP (no database build)
+
+To compare the current Sefaria export and blacklists with an existing release
+database, and package only the missing allowed books as Otzaria text/link files:
+
+```bash
+./gradlew :sefariasqlite:exportIncrementalSefariaOtzaria \
+  -PseedDb=/path/to/seforim.db \
+  -PotzariaOutputZip=/path/to/incremental-sefaria-otzaria.zip
+```
+
+The seed database is opened read-only. The ZIP contains `אוצריא/`, `links/`,
+`metadata.json`, and `files_manifest.json`; it does not create a new database.
+
 ### Basic Import
 
 ```kotlin

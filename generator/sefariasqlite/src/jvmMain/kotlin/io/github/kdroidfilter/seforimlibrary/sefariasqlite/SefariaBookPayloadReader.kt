@@ -26,6 +26,16 @@ import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.readText
 
+internal data class MergedFileSelection(
+    val files: List<Path>,
+    val discoveredCount: Int,
+    val excludedExistingTitleCount: Int,
+    val schemaCount: Int,
+    val schemasWithoutMergedCount: Int,
+    val schemasWithoutMergedExamples: List<String>,
+    val schemasWithoutMergedTitles: List<String>,
+)
+
 internal class SefariaBookPayloadReader(
     private val json: Json,
     private val logger: Logger
@@ -37,7 +47,17 @@ internal class SefariaBookPayloadReader(
                 runCatching {
                     val obj = json.parseToJsonElement(schemaPath.readText()).jsonObject
                     val schemaObj = obj["schema"]?.jsonObject ?: return@runCatching
-                    listOf(schemaObj["title"]?.stringOrNull(), schemaObj["heTitle"]?.stringOrNull()).forEach { key ->
+                    val aliases = buildList<String?> {
+                        add(schemaPath.fileName.name.removeSuffix(".json").replace('_', ' '))
+                        for (holder in listOf(obj, schemaObj)) {
+                            add(holder["title"]?.stringOrNull())
+                            add(holder["heTitle"]?.stringOrNull())
+                            (holder["titles"] as? JsonArray)?.forEach { title ->
+                                add((title as? JsonObject)?.get("text")?.stringOrNull())
+                            }
+                        }
+                    }
+                    aliases.forEach { key ->
                         normalizeTitleKey(key)?.let { normalized ->
                             lookup.putIfAbsent(normalized, schemaPath)
                         }
@@ -49,17 +69,151 @@ internal class SefariaBookPayloadReader(
     }
 
     /**
-     * Read and parse book files in parallel using coroutines.
+     * Finds merged book payloads, optionally excluding books whose normalized
+     * Hebrew/English schema title is already present in a seed database.
+     *
+     * The exclusion check reads only the small schema JSON. It deliberately
+     * avoids parsing the much larger merged.json for existing books, which is
+     * what keeps an incremental release append within GitHub runner memory.
      */
+    fun findMergedFiles(
+        jsonDir: Path,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+        excludedTitleKeys: Set<String> = emptySet(),
+    ): List<Path> = selectMergedFiles(jsonDir, schemaDir, schemaLookup, excludedTitleKeys).files
+
+    fun selectMergedFiles(
+        jsonDir: Path,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+        excludedTitleKeys: Set<String> = emptySet(),
+    ): MergedFileSelection {
+        val mergedFiles = Files.walk(jsonDir).use { stream ->
+            stream.filter { Files.isRegularFile(it) && isHebrewMergedFile(it) }
+                .toList()
+        }
+
+        val schemaPaths = schemaLookup.values.toSet()
+        val mergedSchemaPaths = mergedFiles.mapNotNull { textPath ->
+            val folderName = bookFolderName(textPath) ?: return@mapNotNull null
+            resolveSchemaPath(null, null, folderName, schemaDir, schemaLookup)
+        }.toSet()
+        val schemasWithoutMerged = (schemaPaths - mergedSchemaPaths).sortedBy { it.fileName.toString() }
+        fun selection(files: List<Path>, excludedCount: Int) = MergedFileSelection(
+            files = files,
+            discoveredCount = mergedFiles.size,
+            excludedExistingTitleCount = excludedCount,
+            schemaCount = schemaPaths.size,
+            schemasWithoutMergedCount = schemasWithoutMerged.size,
+            schemasWithoutMergedExamples = schemasWithoutMerged.map { it.fileName.toString().removeSuffix(".json") },
+            schemasWithoutMergedTitles = schemasWithoutMerged.map { it.fileName.toString().removeSuffix(".json") },
+        )
+
+        if (excludedTitleKeys.isEmpty()) return selection(mergedFiles, 0)
+
+        val excludedBySchema = ConcurrentHashMap<Path, Boolean>()
+        val filtered = mergedFiles.filterNot { textPath ->
+            val folderName = bookFolderName(textPath) ?: return@filterNot false
+            val schemaPath = resolveSchemaPath(
+                title = null,
+                heTitle = null,
+                folderName = folderName,
+                schemaDir = schemaDir,
+                lookup = schemaLookup,
+            ) ?: return@filterNot false
+            excludedBySchema.computeIfAbsent(schemaPath) { path ->
+                runCatching {
+                    val schemaJson = json.parseToJsonElement(path.readText()).jsonObject
+                    val schemaObj = schemaJson["schema"]?.jsonObject ?: return@runCatching false
+                    listOf(
+                        schemaObj["title"]?.stringOrNull(),
+                        schemaObj["heTitle"]?.stringOrNull(),
+                    ).any { title -> normalizeTitleKey(title)?.let(excludedTitleKeys::contains) == true }
+                }.getOrDefault(false)
+            }
+        }
+        logger.i {
+            "Incremental title filter retained ${filtered.size}/${mergedFiles.size} merged.json files"
+        }
+        return selection(filtered, mergedFiles.size - filtered.size)
+    }
+
+    /**
+     * Finds Hebrew merged payloads for a small set of schemas. Incremental
+     * link import uses this to load only existing books adjacent to new books.
+     */
+    fun findMergedFilesForSchemas(
+        jsonDir: Path,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+        wantedSchemas: Set<Path>,
+    ): List<Path> {
+        if (wantedSchemas.isEmpty()) return emptyList()
+        val normalizedWanted = wantedSchemas.mapTo(HashSet()) { it.toAbsolutePath().normalize() }
+        return Files.walk(jsonDir).use { stream ->
+            stream.filter { Files.isRegularFile(it) && isHebrewMergedFile(it) }
+                .filter { textPath ->
+                    val folderName = bookFolderName(textPath) ?: return@filter false
+                    val schemaPath = resolveSchemaPath(
+                        title = null,
+                        heTitle = null,
+                        folderName = folderName,
+                        schemaDir = schemaDir,
+                        lookup = schemaLookup,
+                    ) ?: return@filter false
+                    schemaPath.toAbsolutePath().normalize() in normalizedWanted
+                }
+                .toList()
+        }
+    }
+    private fun isHebrewMergedFile(path: Path): Boolean {
+        if (!path.fileName.name.equals("merged.json", ignoreCase = true)) return false
+        val parent = path.parent ?: return true
+        if (parent.fileName.name.equals("Hebrew", ignoreCase = true)) return true
+
+        // Current Sefaria exports use <book>/<language>/merged.json. Retain
+        // compatibility with older flat <book>/merged.json exports, while
+        // excluding English/other-language siblings from the Hebrew database.
+        val bookDir = parent.parent ?: return true
+        val hasLanguageLayout = Files.isDirectory(bookDir.resolve("Hebrew")) ||
+            Files.isDirectory(bookDir.resolve("English"))
+        return !hasLanguageLayout
+    }
+
+    private fun bookFolderName(path: Path): String? {
+        val parent = path.parent ?: return null
+        if (parent.fileName.name.equals("Hebrew", ignoreCase = true)) {
+            return parent.parent?.fileName?.name
+        }
+        val bookDir = parent.parent
+        if (bookDir != null && (
+                Files.isDirectory(bookDir.resolve("Hebrew")) ||
+                    Files.isDirectory(bookDir.resolve("English"))
+                )
+        ) {
+            return bookDir.fileName?.name
+        }
+        return parent.fileName?.name
+    }
+
+    /** Read and parse book files in parallel using coroutines. */
     suspend fun readBooksInParallel(
         jsonDir: Path,
         schemaDir: Path,
-        schemaLookup: Map<String, Path>
+        schemaLookup: Map<String, Path>,
+        excludedTitleKeys: Set<String> = emptySet(),
+    ): List<BookPayload> = readBooksInParallel(
+        mergedFiles = findMergedFiles(jsonDir, schemaDir, schemaLookup, excludedTitleKeys),
+        schemaDir = schemaDir,
+        schemaLookup = schemaLookup,
+    )
+
+    suspend fun readBooksInParallel(
+        mergedFiles: Collection<Path>,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
     ): List<BookPayload> = coroutineScope {
-        val mergedFiles = Files.walk(jsonDir).use { stream ->
-            stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
-                .toList()
-        }
 
         logger.i { "Found ${mergedFiles.size} merged.json files to process" }
 
@@ -84,7 +238,7 @@ internal class SefariaBookPayloadReader(
             val textJson = json.parseToJsonElement(textPath.readText()).jsonObject
             val fileTitle = textJson["title"]?.stringOrNull()
             val fileHeTitle = textJson["heTitle"]?.stringOrNull()
-            val folderName = textPath.parent?.fileName?.name
+            val folderName = bookFolderName(textPath)
 
             val schemaPath = resolveSchemaPath(
                 title = fileTitle,
@@ -374,6 +528,26 @@ internal class SefariaBookPayloadReader(
                 )
             }
 
+            if (node["nodeType"]?.stringOrNull() == "DictionaryNode") {
+                val entries = text as? JsonArray ?: return
+                entries.forEach { element ->
+                    val entry = element as? JsonObject ?: return@forEach
+                    val headword = entry["headword"]?.stringOrNull()?.trim().orEmpty()
+                    val content = entry["text"]?.stringOrNull()?.takeIf { it.isNotBlank() } ?: return@forEach
+                    val cleaned = cleanSefariaLine(content)
+                    if (cleaned.isEmpty()) return@forEach
+                    output += cleaned
+                    val ref = listOf(trimTrailingSeparators(refPrefix), headword)
+                        .filter { it.isNotBlank() }
+                        .joinToString(", ")
+                    val heRef = listOf(trimTrailingSeparators(heRefPrefix), headword)
+                        .filter { it.isNotBlank() }
+                        .joinToString(", ")
+                    refs += RefEntry(ref = ref, heRef = heRef, path = "", lineIndex = output.size)
+                }
+                return
+            }
+
             if (text !is JsonArray && text !is JsonPrimitive && text !is JsonObject) return
 
             if (node.containsKey("nodes")) {
@@ -615,11 +789,24 @@ internal class SefariaBookPayloadReader(
      * The map is keyed by the schema `depth` it applies at; the only
      * practical use so far is `{"2": [...]}` on depth-2 Zohar-style nodes.
      */
-    private fun readIndexOffsets(node: JsonObject, schemaDepth: Int): List<Int>? {
-        val map = node["index_offsets_by_depth"]?.jsonObject ?: return null
+    internal fun readIndexOffsets(node: JsonObject, schemaDepth: Int): List<Int>? {
+        val rawMap = node["index_offsets_by_depth"] ?: return null
+        val map = rawMap as? JsonObject ?: run {
+            logger.w { "Ignoring non-object index_offsets_by_depth: ${rawMap::class.simpleName}" }
+            return null
+        }
         val key = schemaDepth.toString()
-        val arr = map[key]?.jsonArray ?: return null
-        val offsets = arr.mapNotNull { it.jsonPrimitive.intOrNullSafe() }
+        val rawOffsets = map[key] ?: return null
+        val offsets = when (rawOffsets) {
+            is JsonArray -> rawOffsets.mapNotNull { (it as? JsonPrimitive)?.intOrNullSafe() }
+            is JsonPrimitive -> listOfNotNull(rawOffsets.intOrNullSafe()).also {
+                logger.w { "Coerced scalar index_offsets_by_depth[$key] to a one-item list" }
+            }
+            else -> {
+                logger.w { "Ignoring non-array index_offsets_by_depth[$key]: ${rawOffsets::class.simpleName}" }
+                emptyList()
+            }
+        }
         return if (offsets.isNotEmpty()) offsets else null
     }
 
@@ -651,8 +838,10 @@ internal class SefariaBookPayloadReader(
     private fun selectNodeText(node: JsonObject, text: JsonElement?): JsonElement? {
         val key = node["key"]?.stringOrNull()
         val title = node["title"]?.stringOrNull().orEmpty()
+        val isDefault = key.equals("default", ignoreCase = true) ||
+            node["default"]?.jsonPrimitive?.booleanOrNull == true
         val obj = text as? JsonObject ?: return null
-        return if (!key.equals("default", ignoreCase = true) && title.isNotBlank()) {
+        return if (!isDefault && title.isNotBlank()) {
             obj[title]
         } else {
             obj[""] ?: obj[title]

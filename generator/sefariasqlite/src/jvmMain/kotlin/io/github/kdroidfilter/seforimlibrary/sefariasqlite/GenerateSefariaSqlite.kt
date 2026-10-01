@@ -26,7 +26,20 @@ fun main(args: Array<String>) = runBlocking {
         ?: System.getProperty("seforimDb")
         ?: System.getenv("SEFORIM_DB")
         ?: Paths.get("build", "seforim.db").toString()
+    val appendExistingDb = listOf(
+        System.getProperty("appendExistingDb"),
+        System.getenv("APPEND_EXISTING_DB")
+    ).firstOrNull { !it.isNullOrBlank() }
+        ?.let { it.equals("true", ignoreCase = true) || it == "1" }
+        ?: false
+    val onlyMissingBooks = listOf(
+        System.getProperty("onlyMissingBooks"),
+        System.getenv("ONLY_MISSING_BOOKS")
+    ).firstOrNull { !it.isNullOrBlank() }
+        ?.let { it.equals("true", ignoreCase = true) || it == "1" }
+        ?: false
     val useMemoryDb = when {
+        appendExistingDb -> false
         System.getProperty("inMemoryDb") != null -> System.getProperty("inMemoryDb") != "false"
         System.getenv("IN_MEMORY_DB") != null -> System.getenv("IN_MEMORY_DB") != "false"
         dbPath == ":memory:" -> true
@@ -42,7 +55,7 @@ fun main(args: Array<String>) = runBlocking {
     val exportRoot: Path = exportDirArg?.let { Paths.get(it) } ?: SefariaExportFetcher.ensureLocalExport(logger)
 
     // Prepare DB (optionally in-memory)
-    if (!useMemoryDb) {
+    if (!useMemoryDb && !appendExistingDb) {
         val dbFile = File(dbPath)
         if (dbFile.exists()) {
             val backup = File("$dbPath.bak")
@@ -53,6 +66,12 @@ fun main(args: Array<String>) = runBlocking {
                 logger.w { "Failed to move existing DB; it will be overwritten." }
             }
         }
+    } else if (appendExistingDb) {
+        val dbFile = File(dbPath)
+        require(dbFile.isFile) {
+            "appendExistingDb requires an existing database at ${dbFile.absolutePath}"
+        }
+        logger.i { "Appending missing Sefaria books to ${dbFile.absolutePath}" }
     }
 
     val jdbcUrl = if (useMemoryDb) "jdbc:sqlite::memory:" else "jdbc:sqlite:$dbPath"
@@ -96,6 +115,7 @@ fun main(args: Array<String>) = runBlocking {
             repository = repository,
             allocator = allocator,
             buildVersion = buildVersion,
+            onlyMissingBooks = onlyMissingBooks,
             logger = Logger.withTag("SefariaDirect")
         )
         importer.import()

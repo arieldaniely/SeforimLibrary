@@ -32,25 +32,38 @@ fun main(args: Array<String>) = runBlocking {
         ?: seforimDbPropOrEnv
         ?: Paths.get("build", "seforim.db").toString()
     val useMemoryDb = (System.getProperty("inMemoryDb") == "true") || dbPath == ":memory:"
+    val booksDir = System.getProperty("booksDir")
+        ?: System.getenv("OTZARIA_BOOKS_DIR")
     val sourceDir = args.getOrNull(1)
         ?: System.getProperty("sourceDir")
         ?: System.getenv("OTZARIA_SOURCE_DIR")
         ?: OtzariaFetcher.ensureLocalSource(logger).toString()
-    val acronymDbPath = args.getOrNull(2)
-        ?: System.getProperty("acronymDb")
-        ?: System.getenv("ACRONYM_DB")
-        ?: run {
-            // Prefer an already-downloaded DB under build/; otherwise fetch latest
-            val defaultPath = Paths.get("build", "acronymizer", "acronymizer.db").toFile()
-            if (defaultPath.exists() && defaultPath.isFile) defaultPath.absolutePath
-            else AcronymizerFetcher.ensureLocalDb(logger).toAbsolutePath().toString()
-        }
+    val skipAcronyms = (System.getProperty("skipAcronyms")
+        ?: System.getenv("SKIP_ACRONYMS"))?.toBoolean() == true
+    val acronymDbPath = if (skipAcronyms) null else {
+        args.getOrNull(2)
+            ?: System.getProperty("acronymDb")
+            ?: System.getenv("ACRONYM_DB")
+            ?: run {
+                val defaultPath = Paths.get("build", "acronymizer", "acronymizer.db").toFile()
+                if (defaultPath.exists() && defaultPath.isFile) defaultPath.absolutePath
+                else AcronymizerFetcher.ensureLocalDb(logger).toAbsolutePath().toString()
+            }
+    }
     val appendExistingDb = listOf(
         System.getProperty("appendExistingDb"),
         System.getenv("APPEND_EXISTING_DB")
     ).firstOrNull { !it.isNullOrBlank() }
         ?.let { it.equals("true", ignoreCase = true) || it == "1" }
         ?: false
+    val onlyMissingBooks = listOf(
+        System.getProperty("onlyMissingBooks"),
+        System.getenv("ONLY_MISSING_BOOKS")
+    ).firstOrNull { !it.isNullOrBlank() }
+        ?.let { it.equals("true", ignoreCase = true) || it == "1" }
+        ?: false
+    val newBookIdsPath = System.getProperty("newBookIdsFile")
+        ?: System.getenv("NEW_BOOK_IDS_FILE")
     val persistDbPath = System.getProperty("persistDb")
         ?: System.getenv("SEFORIM_DB_OUT")
         ?: if (appendExistingDb) seforimDbPropOrEnv else null
@@ -144,10 +157,22 @@ fun main(args: Array<String>) = runBlocking {
             sourceDirectory = Paths.get(sourceDir),
             repository = repository,
             acronymDbPath = acronymDbPath,
+            booksDirectory = booksDir?.let(Paths::get),
             allocator = allocator,
             buildVersion = buildVersion,
+            onlyMissingBooks = onlyMissingBooks,
         )
         generator.generateLinesOnly()
+        if (newBookIdsPath != null) {
+            val output = Paths.get(newBookIdsPath)
+            output.parent?.let { Files.createDirectories(it) }
+            val ids = generator.getNewlyAddedBookIds().sorted()
+            Files.writeString(
+                output,
+                if (ids.isEmpty()) "" else ids.joinToString(separator = "\n", postfix = "\n"),
+            )
+            logger.i { "Wrote ${ids.size} new Otzaria book IDs to $output" }
+        }
         if (useMemoryDb) {
             // Persist in-memory DB to disk using VACUUM INTO (target must not exist)
             runCatching {

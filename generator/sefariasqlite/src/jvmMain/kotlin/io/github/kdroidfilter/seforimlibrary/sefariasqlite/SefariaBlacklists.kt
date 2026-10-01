@@ -67,8 +67,8 @@ internal fun filterBlacklistedPayloads(
     var skippedTotal = 0
     var skippedByBook = 0
     var skippedByAuthor = 0
-    val skippedBookExamples = ArrayList<String>(5)
-    val skippedAuthorExamples = ArrayList<String>(5)
+    val skippedBookExamples = ArrayList<String>()
+    val skippedAuthorExamples = ArrayList<String>()
     val skippedNormalizedPaths = LinkedHashSet<String>()
 
     val filtered = payloads.filter { payload ->
@@ -81,14 +81,12 @@ internal fun filterBlacklistedPayloads(
 
             if (bookBlacklisted) {
                 skippedByBook++
-                if (skippedBookExamples.size < 5) skippedBookExamples += payload.heTitle
+                skippedBookExamples += payload.heTitle
             }
             if (authorBlacklisted) {
                 skippedByAuthor++
-                if (skippedAuthorExamples.size < 5) {
-                    val author = payload.authors.firstOrNull().orEmpty()
-                    skippedAuthorExamples += if (author.isBlank()) payload.heTitle else "${payload.heTitle} ($author)"
-                }
+                val author = payload.authors.firstOrNull().orEmpty()
+                skippedAuthorExamples += if (author.isBlank()) payload.heTitle else "${payload.heTitle} ($author)"
             }
 
             false

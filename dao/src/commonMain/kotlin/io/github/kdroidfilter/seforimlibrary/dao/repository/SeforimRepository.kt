@@ -2902,6 +2902,54 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         }
     }
 
+    /** Returns core rows for all books without per-book metadata queries. */
+    suspend fun getAllBooksCore(): List<Book> = withContext(Dispatchers.IO) {
+        database.bookQueriesQueries.selectAll().executeAsList().map { it.toModel(json) }
+    }
+
+    /**
+     * Returns `(bookId, Hebrew title, source name)` for incremental import
+     * selection without loading authors, topics, dates or publication places.
+     */
+    suspend fun getAllBookSourceIdentities(): List<Triple<Long, String, String>> = withContext(Dispatchers.IO) {
+        val sourceNames = database.sourceQueriesQueries.selectAll().executeAsList()
+            .associate { it.id to it.name }
+        database.bookQueriesQueries.selectAll().executeAsList().map { row ->
+            Triple(row.id, row.title, sourceNames[row.sourceId] ?: "Unknown")
+        }
+    }
+
+    /**
+     * Returns the stable id and Hebrew title of every book without loading
+     * authors/topics/publication metadata. Intended for incremental importers
+     * that only need a lightweight existence index.
+     */
+    suspend fun getAllBookIdsAndTitles(): List<Pair<Long, String>> = withContext(Dispatchers.IO) {
+        database.bookQueriesQueries.selectAll().executeAsList().map { row ->
+            row.id to row.title
+        }
+    }
+    /** Lightweight line-index to stable-id mapping for incremental generators. */
+    suspend fun getLineIdsByBookId(bookId: Long): Map<Int, Long> = withContext(Dispatchers.IO) {
+        val result = HashMap<Int, Long>()
+        driver.executeQuery(
+            identifier = null,
+            sql = "SELECT id, lineIndex FROM line WHERE bookId = ? ORDER BY lineIndex",
+            mapper = { cursor: SqlCursor ->
+                while (cursor.next().value) {
+                    val id = cursor.getLong(0)
+                    val lineIndex = cursor.getLong(1)
+                    if (id != null && lineIndex != null) result[lineIndex.toInt()] = id
+                }
+                QueryResult.Value(Unit)
+            },
+            parameters = 1,
+        ) {
+            bindLong(0, bookId)
+        }.await()
+        result
+    }
+
     /**
      * Returns the IDs of all base books (isBaseBook = 1).
      */

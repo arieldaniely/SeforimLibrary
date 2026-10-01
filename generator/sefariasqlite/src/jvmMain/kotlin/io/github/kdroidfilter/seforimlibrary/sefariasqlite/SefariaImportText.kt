@@ -48,6 +48,7 @@ internal fun mapSectionNameToHebrew(base: String?): String? {
     return when {
         "aliyah" in norm || "aliya" in norm -> "עליה"
         "daf" in norm -> "דף"
+        "sheilta" in norm -> "שאילתא"
         "chapter" in norm -> "פרק"
         "perek" in norm -> "פרק"
         "siman" in norm -> "סימן"

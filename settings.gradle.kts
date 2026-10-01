@@ -28,6 +28,10 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
+
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention").version("1.0.0")
+}
 include(":core")
 include(":dao")
 include(":search")
@@ -39,6 +43,7 @@ include(":sefariasqlite")
 include(":otzariasqlite")
 include(":generator-common")
 include(":delta-updater")
+include(":importer-app")
 
 project(":catalog").projectDir = file("generator/catalog")
 project(":searchindex").projectDir = file("generator/searchindex")
@@ -46,5 +51,6 @@ project(":packaging").projectDir = file("generator/packaging")
 project(":sefariasqlite").projectDir = file("generator/sefariasqlite")
 project(":otzariasqlite").projectDir = file("generator/otzariasqlite")
 project(":generator-common").projectDir = file("generator/common")
+project(":importer-app").projectDir = file("generator/importer-app")
 
 includeBuild("SeforimMagicIndexer")

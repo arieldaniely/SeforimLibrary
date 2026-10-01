@@ -5,6 +5,7 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -38,6 +39,23 @@ fun main(args: Array<String>) = runBlocking {
     val driver = JdbcSqliteDriver(url = jdbcUrl)
     val repository = SeforimRepository(dbPath, driver)
 
+    val incrementalBookIds = (System.getProperty("newBookIdsFile")
+        ?: System.getenv("NEW_BOOK_IDS_FILE"))?.let { rawPath ->
+        val path = Paths.get(rawPath)
+        require(java.nio.file.Files.isRegularFile(path)) { "New-book ID file not found at $path" }
+        java.nio.file.Files.readAllLines(path).mapNotNull { it.trim().toLongOrNull() }.toSet()
+    }
+
+    if (incrementalBookIds != null) {
+        val relevant = incrementalBookIds.mapNotNull { repository.getBookCore(it) }.any { book ->
+            book.title.startsWith("חברותא על ") || book.title.startsWith("הערות על חברותא")
+        }
+        if (!relevant) {
+            logger.i { "No new Havrouta/Hearot books; skipping Havrouta link generation" }
+            repository.close()
+            return@runBlocking
+        }
+    }
     val sourceDir = System.getProperty("sourceDir")
         ?: System.getenv("OTZARIA_SOURCE_DIR")
         ?: OtzariaFetcher.ensureLocalSource(logger).toString()
@@ -61,19 +79,23 @@ fun main(args: Array<String>) = runBlocking {
         repository.executeRawQuery("PRAGMA journal_mode = OFF")
 
         logger.i { "Starting Havrouta-Talmud link generation..." }
-        val talmudLinksCreated = generateHavroutaLinks(repository, bindings, logger)
+        val talmudLinksCreated = generateHavroutaLinks(repository, bindings, logger, incrementalBookIds)
         logger.i { "Havrouta-Talmud link generation completed. Created $talmudLinksCreated links." }
 
         logger.i { "Starting Havrouta-Hearot link generation from Otzaria files..." }
-        val hearotLinksCreated = generateHavroutaHearotLinks(repository, bindings, logger, sourceDir)
+        val hearotLinksCreated = generateHavroutaHearotLinks(
+            repository, bindings, logger, sourceDir, incrementalBookIds
+        )
         logger.i { "Havrouta-Hearot link generation completed. Created $hearotLinksCreated links." }
 
         logger.i { "Creating transitive Talmud-Hearot links..." }
-        val transitiveLinksCreated = generateTalmudHearotTransitiveLinks(repository, bindings, logger)
+        val transitiveLinksCreated = generateTalmudHearotTransitiveLinks(
+            repository, bindings, logger, incrementalBookIds
+        )
         logger.i { "Transitive Talmud-Hearot link generation completed. Created $transitiveLinksCreated links." }
 
         logger.i { "Setting Hearot as default commentators for Havrouta books..." }
-        setHearotAsDefaultCommentators(repository, logger)
+        setHearotAsDefaultCommentators(repository, logger, incrementalBookIds)
 
         logger.i { "Total links created: ${talmudLinksCreated + hearotLinksCreated + transitiveLinksCreated}" }
 
@@ -129,6 +151,19 @@ private val boldPattern = Regex("""<b>([^<]+)</b>""")
 private val havroutaDafPattern = Regex("""<h3>\s*דף\s+([^<]+)</h3>""")
 private val talmudDafPattern = Regex("""<h2>דף\s*([^<]+)</h2>""")
 
+private fun selectedHavroutaBooks(allBooks: List<Book>, affectedBookIds: Set<Long>?): List<Book> {
+    val havroutaBooks = allBooks.filter { it.title.startsWith("חברותא על ") }
+    if (affectedBookIds == null) return havroutaBooks
+    val affectedHearotTractates = allBooks.asSequence()
+        .filter { it.id in affectedBookIds && it.title.startsWith("הערות על חברותא") }
+        .map { it.title.removePrefix("הערות על חברותא").trim() }
+        .toSet()
+    return havroutaBooks.filter { book ->
+        book.id in affectedBookIds ||
+            book.title.removePrefix("חברותא על ").trim() in affectedHearotTractates
+    }
+}
+
 /**
  * Normalizes text for comparison by removing nikud, punctuation, and extra spaces.
  */
@@ -171,15 +206,17 @@ private fun isSectionHeader(content: String): Boolean {
 private suspend fun generateHavroutaLinks(
     repository: SeforimRepository,
     bindings: IdAllocatorBindings,
-    logger: Logger
+    logger: Logger,
+    affectedBookIds: Set<Long>? = null,
 ): Int {
     val ctCommentary = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
     // Find all Havrouta books
-    val havroutaBooks = repository.getAllBooks().filter { it.title.startsWith("חברותא על ") }
+    val allBooks = repository.getAllBooksCore()
+    val havroutaBooks = selectedHavroutaBooks(allBooks, affectedBookIds)
     logger.i { "Found ${havroutaBooks.size} Havrouta books" }
 
     // Find all Talmud Bavli tractates
-    val talmudBooks = repository.getAllBooks().filter { book ->
+    val talmudBooks = allBooks.filter { book ->
         book.sourceId == 1L &&
             !book.title.startsWith("משנה") &&
             !book.title.startsWith("תלמוד ירושלמי") &&
@@ -502,7 +539,8 @@ private suspend fun generateHavroutaHearotLinks(
     repository: SeforimRepository,
     bindings: IdAllocatorBindings,
     logger: Logger,
-    sourceDir: String
+    sourceDir: String,
+    affectedBookIds: Set<Long>? = null,
 ): Int {
     val ctCommentary = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
     val linksDir = File(sourceDir, "links")
@@ -513,8 +551,8 @@ private suspend fun generateHavroutaHearotLinks(
 
     // Get all books and build lookup maps
     logger.i { "Loading all books into RAM..." }
-    val allBooks = repository.getAllBooks()
-    val havroutaBooks = allBooks.filter { it.title.startsWith("חברותא על ") }
+    val allBooks = repository.getAllBooksCore()
+    val havroutaBooks = selectedHavroutaBooks(allBooks, affectedBookIds)
     val hearotBooks = allBooks.filter { it.title.startsWith("הערות על חברותא") }
     val booksByTitle = allBooks.associateBy { it.title }
 
@@ -624,10 +662,11 @@ private suspend fun generateHavroutaHearotLinks(
  */
 private suspend fun setHearotAsDefaultCommentators(
     repository: SeforimRepository,
-    logger: Logger
+    logger: Logger,
+    affectedBookIds: Set<Long>? = null,
 ) {
-    val allBooks = repository.getAllBooks()
-    val havroutaBooks = allBooks.filter { it.title.startsWith("חברותא על ") }
+    val allBooks = repository.getAllBooksCore()
+    val havroutaBooks = selectedHavroutaBooks(allBooks, affectedBookIds)
     val hearotBooks = allBooks.filter { it.title.startsWith("הערות על חברותא") }
 
     // Build a map from tractate name to Hearot book
@@ -663,20 +702,21 @@ private suspend fun setHearotAsDefaultCommentators(
 private suspend fun generateTalmudHearotTransitiveLinks(
     repository: SeforimRepository,
     @Suppress("UNUSED_PARAMETER") bindings: IdAllocatorBindings,
-    logger: Logger
+    logger: Logger,
+    affectedBookIds: Set<Long>? = null,
 ): Int {
     // NOTE: transitive links are emitted via a single bulk SQL INSERT and use
     // auto-allocated ids. Stabilising them via the allocator would require
     // post-fixing each new row — deferred to Phase 4 because these links are
     // pure derivatives (recomputable from primary links each build).
-    val allBooks = repository.getAllBooks()
+    val allBooks = repository.getAllBooksCore()
     val talmudBooks = allBooks.filter { book ->
         book.sourceId == 1L &&
             !book.title.startsWith("משנה") &&
             !book.title.startsWith("תלמוד ירושלמי") &&
             !book.title.startsWith("תוספתא")
     }
-    val havroutaBooks = allBooks.filter { it.title.startsWith("חברותא על ") }
+    val havroutaBooks = selectedHavroutaBooks(allBooks, affectedBookIds)
     val hearotBooks = allBooks.filter { it.title.startsWith("הערות על חברותא") }
 
     val talmudBookIds = talmudBooks.map { it.id }.joinToString(",")

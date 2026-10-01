@@ -1,6 +1,9 @@
 package io.github.kdroidfilter.seforimlibrary.searchindex
 
 interface LookupIndexWriter : AutoCloseable {
+    /** Removes the book and TOC lookup documents belonging to [bookId]. */
+    fun deleteBookById(bookId: Long) { /* default no-op */ }
+
     fun addBook(
         bookId: Long,
         categoryId: Long,

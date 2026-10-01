@@ -81,12 +81,31 @@ val books = repository.getBooksByCategory(categoryId)
 // Get book details
 val book = repository.getBook(bookId)
 
+
 // Get lines of text
 val lines = repository.getLines(bookId, startIndex, endIndex)
 
 // Get table of contents
 val toc = repository.getBookToc(bookId)
 ```
+
+### Desktop importer
+
+To import a local database, books directory, and separate JSON links directory
+through a graphical interface:
+
+```bash
+./gradlew :importer-app:run
+```
+
+Build the portable Windows application (bundled runtime, no installation) with:
+
+```powershell
+./gradlew.bat :importer-app:packagePortableZip
+```
+
+Extract the ZIP and run `seforim-importer.exe`. See
+`generator/importer-app/README.md` for input layout and generated artifacts.
 
 ## Database Generation
 

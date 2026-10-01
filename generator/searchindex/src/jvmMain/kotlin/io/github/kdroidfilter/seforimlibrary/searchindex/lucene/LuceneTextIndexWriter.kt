@@ -12,6 +12,7 @@ import org.apache.lucene.document.StringField
 import org.apache.lucene.document.TextField
 import org.apache.lucene.index.IndexWriter
 import org.apache.lucene.index.IndexWriterConfig
+import org.apache.lucene.index.NoMergePolicy
 import org.apache.lucene.store.FSDirectory
 import java.nio.file.Path
 
@@ -29,6 +30,7 @@ class LuceneTextIndexWriter(
     // Optional dense embeddings: if provided, each line doc also gets a
     // KnnFloatVectorField("vec", COSINE) -> SINGLE index holding text + vectors.
     private val vectorProvider: ((Long) -> FloatArray?)? = null,
+    append: Boolean = false,
 ) : TextIndexWriter {
     companion object Fields {
         const val FIELD_TYPE = "type"
@@ -56,7 +58,11 @@ class LuceneTextIndexWriter(
 
     init {
         val cfg = IndexWriterConfig(analyzer).apply {
-            openMode = IndexWriterConfig.OpenMode.CREATE
+            openMode = if (append) IndexWriterConfig.OpenMode.CREATE_OR_APPEND else IndexWriterConfig.OpenMode.CREATE
+            // An incremental release adds a small segment to a multi-GB seed
+            // index. Merging old segments here is unnecessary and can exceed
+            // the memory/disk limits of a free GitHub Actions runner.
+            if (append) mergePolicy = NoMergePolicy.INSTANCE
         }
         writer = IndexWriter(dir, cfg)
     }
@@ -131,6 +137,10 @@ class LuceneTextIndexWriter(
             add(TextField(FIELD_TITLE, term, Field.Store.NO))
         }
         writer.addDocument(doc)
+    }
+
+    override fun deleteBookById(bookId: Long) {
+        writer.deleteDocuments(IntPoint.newExactQuery(FIELD_BOOK_ID, bookId.toInt()))
     }
 
     override fun deleteLineById(lineId: Long) {
