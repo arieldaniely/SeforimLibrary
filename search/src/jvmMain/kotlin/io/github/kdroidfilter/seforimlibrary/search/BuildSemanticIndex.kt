@@ -2,7 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.search
 
 import org.apache.lucene.document.Document
 import org.apache.lucene.document.IntPoint
-import org.apache.lucene.document.KnnFloatVectorField
+import org.apache.lucene.document.KnnByteVectorField
 import org.apache.lucene.document.StoredField
 import org.apache.lucene.analysis.standard.StandardAnalyzer
 import org.apache.lucene.index.IndexWriter
@@ -87,7 +87,7 @@ fun main(args: Array<String>) {
                                                 add(StoredField("book_id", bookId))
                                                 add(IntPoint("book_id", bookId.toInt()))
                                                 add(IntPoint("is_base_book", isBaseBook))
-                                                add(KnnFloatVectorField("vec", vector, VectorSimilarityFunction.COSINE))
+                                                add(KnnByteVectorField("vec", Int8Vectors.quantize(vector), VectorSimilarityFunction.COSINE))
                                             }
                                             writer.addDocument(document)
                                             val done = indexed.incrementAndGet()
@@ -121,6 +121,7 @@ fun main(args: Array<String>) {
     require(sha256(db) == databaseSha256) { "Database changed while building semantic shard" }
     val properties = Properties().apply {
         setProperty("format", "zayit-round2-1")
+        setProperty("vectorEncoding", Int8Vectors.ENCODING)
         setProperty("dimension", "256")
         setProperty("shardIndex", shardIndex.toString())
         setProperty("shardCount", shardCount.toString())

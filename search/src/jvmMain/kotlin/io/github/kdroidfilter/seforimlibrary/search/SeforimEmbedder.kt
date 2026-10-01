@@ -13,7 +13,7 @@ import java.nio.file.Path
  * Produces L2-normalized 256-d Round 2 embeddings for Hebrew/Aramaic text on the JVM.
  *
  * The ONNX graph bakes in pooling + projection + L2 normalization, so [embed] returns
- * a vector ready for a Lucene `KnnFloatVectorField` (cosine). Query text is normalized
+ * a float vector quantized by [Int8Vectors] for Lucene byte-vector cosine search. Query text is normalized
  * with [Round2Normalizer] to match the training distribution.
  *
  * Model artifacts (from the SeforimEmbedding release):

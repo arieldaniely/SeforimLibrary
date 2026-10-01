@@ -3,10 +3,12 @@ package io.github.kdroidfilter.seforimlibrary.search
 import org.apache.lucene.document.IntPoint
 import org.apache.lucene.index.DirectoryReader
 import org.apache.lucene.index.FieldInfos
+import org.apache.lucene.index.VectorEncoding
 import org.apache.lucene.search.BooleanClause
 import org.apache.lucene.search.BooleanQuery
 import org.apache.lucene.search.IndexSearcher
 import org.apache.lucene.search.KnnFloatVectorQuery
+import org.apache.lucene.search.KnnByteVectorQuery
 import org.apache.lucene.search.Query
 import org.apache.lucene.store.FSDirectory
 import org.apache.lucene.store.NIOFSDirectory
@@ -40,6 +42,7 @@ class VectorSearcher(
         if (System.getProperty("org.graalvm.nativeimage.imagecode") != null) NIOFSDirectory(path)
         else FSDirectory.open(path)
     }
+    private val byteVectors: Boolean
 
     init {
         try {
@@ -50,12 +53,16 @@ class VectorSearcher(
                 }
             }
             val first = manifests.first()
+            val encoding = first.getProperty("vectorEncoding", "float32")
+            require(encoding == "float32" || encoding == Int8Vectors.ENCODING) { "Unknown vector encoding: $encoding" }
+            byteVectors = encoding == Int8Vectors.ENCODING
             val shardCount = first.getProperty("shardCount")?.toIntOrNull()
             require(first.getProperty("format") == "zayit-round2-1" && shardCount == dirs.size)
             require(manifests.map { it.getProperty("shardIndex")?.toIntOrNull() }.toSet() ==
                 (0 until dirs.size).toSet()) { "Missing semantic index shard" }
             require(manifests.all {
                 it.getProperty("format") == first.getProperty("format") &&
+                    it.getProperty("vectorEncoding", "float32") == encoding &&
                     it.getProperty("databaseSha256") == first.getProperty("databaseSha256") &&
                     it.getProperty("modelSha256") == first.getProperty("modelSha256") &&
                     it.getProperty("tokenizerSha256") == first.getProperty("tokenizerSha256") &&
@@ -75,9 +82,13 @@ class VectorSearcher(
             }
             dirs.forEach { dir ->
                 DirectoryReader.open(dir).use { reader ->
-                    val dimension = FieldInfos.getMergedFieldInfos(reader).fieldInfo("vec")?.vectorDimension
+                    val field = FieldInfos.getMergedFieldInfos(reader).fieldInfo("vec")
+                    val dimension = field?.vectorDimension
                     require(dimension == expectedDim) {
                         "Semantic index has dimension $dimension; expected $expectedDim"
+                    }
+                    require(field.vectorEncoding == if (byteVectors) VectorEncoding.BYTE else VectorEncoding.FLOAT32) {
+                        "Semantic index vector encoding does not match its manifest"
                     }
                 }
             }
@@ -101,10 +112,13 @@ class VectorSearcher(
     }
 
     fun search(query: FloatArray, k: Int, baseBookOnly: Boolean = false, bookIds: Collection<Long>? = null): List<DenseHit> {
+        val byteQuery = if (byteVectors) Int8Vectors.quantize(query) else null
         return dirs.flatMap { dir ->
             DirectoryReader.open(dir).use { reader ->
                 val searcher = IndexSearcher(reader)
-                val knn = KnnFloatVectorQuery("vec", query, k, filterQuery(baseBookOnly, bookIds))
+                val filter = filterQuery(baseBookOnly, bookIds)
+                val knn: Query = if (byteQuery != null) KnnByteVectorQuery("vec", byteQuery, k, filter)
+                    else KnnFloatVectorQuery("vec", query, k, filter)
                 val top = searcher.search(knn, k)
                 val stored = searcher.storedFields()
                 top.scoreDocs.map { sd ->
