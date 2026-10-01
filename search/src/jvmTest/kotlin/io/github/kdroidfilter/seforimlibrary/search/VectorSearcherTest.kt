@@ -34,35 +34,67 @@ class VectorSearcherTest {
         assertFailsWith<IllegalArgumentException> { VectorSearcher(root, expectedDim = 3).close() }
     }
 
-    private fun withIndex(int8: Boolean, encoding: String? = if (int8) Int8Vectors.ENCODING else null,
-        block: (java.nio.file.Path) -> Unit) {
+    @Test
+    fun stillSearchesLegacyShardedBundles() = withIndex(true, shardCount = 2) { root ->
+        VectorSearcher(root, expectedDim = 3).use { searcher ->
+            val query = floatArrayOf(1f, 0f, 0f)
+            repeat(3) {
+                assertEquals(
+                    setOf(1L, 2L, 3L, 4L),
+                    searcher.search(query, 4)
+                        .map { it.lineId }
+                        .toSet(),
+                )
+                assertEquals(
+                    setOf(2L, 4L),
+                    searcher.search(query, 4, baseBookOnly = true)
+                        .map { it.lineId }
+                        .toSet(),
+                )
+                assertEquals(
+                    listOf(3L),
+                    searcher.search(query, 4, bookIds = listOf(13L))
+                        .map { it.lineId },
+                )
+            }
+        }
+    }
+
+    private fun withIndex(
+        int8: Boolean,
+        encoding: String? = if (int8) Int8Vectors.ENCODING else null,
+        shardCount: Int = 1,
+        block: (java.nio.file.Path) -> Unit,
+    ) {
         val root = Files.createTempDirectory("semantic-int8-test")
         try {
-            val shard = Files.createDirectories(root.resolve("shard-00"))
-            FSDirectory.open(shard).use { directory ->
-                IndexWriter(directory, IndexWriterConfig(StandardAnalyzer())).use { writer ->
-                    for ((index, vector) in listOf(floatArrayOf(1f, 0f, 0f), floatArrayOf(0f, 1f, 0f)).withIndex()) {
-                        writer.addDocument(Document().apply {
-                            add(StoredField("line_id", (index + 1).toLong()))
-                            add(StoredField("book_id", (index + 11).toLong()))
-                            add(IntPoint("book_id", index + 11))
-                            add(IntPoint("is_base_book", index))
-                            add(if (int8) KnnByteVectorField("vec", Int8Vectors.quantize(vector), VectorSimilarityFunction.COSINE)
-                                else KnnFloatVectorField("vec", vector, VectorSimilarityFunction.COSINE))
-                        })
+            for (shardIndex in 0 until shardCount) {
+                val shard = Files.createDirectories(root.resolve("shard-%02d".format(shardIndex)))
+                FSDirectory.open(shard).use { directory ->
+                    IndexWriter(directory, IndexWriterConfig(StandardAnalyzer())).use { writer ->
+                        for ((index, vector) in listOf(floatArrayOf(1f, 0f, 0f), floatArrayOf(0f, 1f, 0f)).withIndex()) {
+                            writer.addDocument(Document().apply {
+                                add(StoredField("line_id", (shardIndex * 2 + index + 1).toLong()))
+                                add(StoredField("book_id", (shardIndex * 2 + index + 11).toLong()))
+                                add(IntPoint("book_id", shardIndex * 2 + index + 11))
+                                add(IntPoint("is_base_book", index))
+                                add(if (int8) KnnByteVectorField("vec", Int8Vectors.quantize(vector), VectorSimilarityFunction.COSINE)
+                                    else KnnFloatVectorField("vec", vector, VectorSimilarityFunction.COSINE))
+                            })
+                        }
                     }
                 }
+                val properties = Properties().apply {
+                    setProperty("format", "zayit-round2-1")
+                    setProperty("dimension", "3")
+                    setProperty("shardIndex", shardIndex.toString())
+                    setProperty("shardCount", shardCount.toString())
+                    setProperty("eligible", "2")
+                    setProperty("indexed", "2")
+                    encoding?.let { setProperty("vectorEncoding", it) }
+                }
+                Files.newOutputStream(shard.resolve("semantic.properties")).use { properties.store(it, null) }
             }
-            val properties = Properties().apply {
-                setProperty("format", "zayit-round2-1")
-                setProperty("dimension", "3")
-                setProperty("shardIndex", "0")
-                setProperty("shardCount", "1")
-                setProperty("eligible", "2")
-                setProperty("indexed", "2")
-                encoding?.let { setProperty("vectorEncoding", it) }
-            }
-            Files.newOutputStream(shard.resolve("semantic.properties")).use { properties.store(it, null) }
             block(root)
         } finally {
             root.toFile().deleteRecursively()

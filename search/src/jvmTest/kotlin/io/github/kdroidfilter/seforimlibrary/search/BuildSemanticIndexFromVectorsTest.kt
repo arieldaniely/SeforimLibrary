@@ -39,6 +39,56 @@ class BuildSemanticIndexFromVectorsTest {
         }
     }
 
+    @Test
+    fun combinesGpuFilesIntoOneSearchableSegment() {
+        withFixture(true) { args, bytes ->
+            val vectors = Files.createDirectory(java.nio.file.Path.of(args[2]).resolveSibling("gpu-vectors"))
+            Files.write(vectors.resolve("shard-00.bin"), bytes)
+            val second = bytes.copyOf()
+            ByteBuffer.wrap(second).order(ByteOrder.LITTLE_ENDIAN).putLong(12, 2L).putLong(20, 12L)
+            Files.write(vectors.resolve("shard-01.bin"), second)
+            // A GPU may have no eligible rows; its header-only stream is valid.
+            Files.write(vectors.resolve("shard-02.bin"), bytes.copyOf(12))
+            args[2] = vectors.toString()
+            buildSemanticIndexFromVectors(args)
+            val root = java.nio.file.Path.of(args[3])
+            FSDirectory.open(root.resolve("shard-00")).use { directory ->
+                DirectoryReader.open(directory).use { reader ->
+                    assertEquals(2, reader.numDocs())
+                    assertEquals(1, reader.leaves().size)
+                }
+            }
+            VectorSearcher(root).use { searcher ->
+                val query = FloatArray(256) { if (it == 0) 1f else 0f }
+                repeat(3) {
+                    assertEquals(
+                        setOf(1L, 2L),
+                        searcher.search(query, 2)
+                            .map { it.lineId }
+                            .toSet(),
+                    )
+                    assertEquals(
+                        listOf(2L),
+                        searcher.search(query, 2, bookIds = listOf(12L))
+                            .map { it.lineId },
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun failedRebuildRemovesCompletionManifest() {
+        withFixture(true) { args, bytes ->
+            buildSemanticIndexFromVectors(args)
+            val manifest = java.nio.file.Path.of(args[3]).resolve("shard-00/semantic.properties")
+            ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).putInt(8, 128)
+            Files.write(java.nio.file.Path.of(args[2]), bytes)
+            assertFailsWith<IllegalArgumentException> { buildSemanticIndexFromVectors(args) }
+            assertEquals(false, Files.exists(manifest))
+        }
+    }
+
     private fun withFixture(int8: Boolean, block: (Array<String>, ByteArray) -> Unit) {
         val root = Files.createTempDirectory("semantic-record-test")
         try {

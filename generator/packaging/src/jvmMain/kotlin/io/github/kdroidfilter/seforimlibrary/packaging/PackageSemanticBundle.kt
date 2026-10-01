@@ -17,14 +17,16 @@ private const val TOKENIZER_SHA = "0664287976ecb078bdfd8f5e5515dc87d8cb7f985a79a
 
 /** Package a complete local semantic index without including the database itself. */
 fun main(args: Array<String>) {
-    require(args.size == 5) {
-        "Usage: PackageSemanticBundle <seforim.db> <model-dir> <index-dir> <output.tar.zst> <split-bytes>"
+    require(args.size in 5..6) {
+        "Usage: PackageSemanticBundle <seforim.db> <model-dir> <index-dir> <output.tar.zst> <split-bytes> [zstd-level]"
     }
     val db = Path.of(args[0]).toAbsolutePath()
     val model = Path.of(args[1]).toAbsolutePath()
     val index = Path.of(args[2]).toAbsolutePath()
     val output = Path.of(args[3]).toAbsolutePath()
     val splitBytes = args[4].toLong()
+    val compressionLevel = args.getOrNull(5)?.toInt() ?: 22
+    require(compressionLevel in 1..22)
     require(splitBytes > 0 && output.fileName.toString().endsWith(".tar.zst"))
     require(Files.isRegularFile(db) && Files.isDirectory(index))
     require(sha256(model.resolve(MODEL_FILE)) == MODEL_SHA) { "Unexpected Round 2 model" }
@@ -38,7 +40,7 @@ fun main(args: Array<String>) {
     Files.createDirectories(output.parent)
     val split = SplitArchiveOutput(output, splitBytes)
     try {
-        ZstdOutputStream(BufferedOutputStream(split, 1 shl 20), 6).use { zstd ->
+        ZstdOutputStream(BufferedOutputStream(split, 1 shl 20), compressionLevel).use { zstd ->
             TarArchiveOutputStream(zstd).use { tar ->
                 tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
                 tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)

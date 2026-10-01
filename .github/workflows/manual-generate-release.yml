@@ -169,7 +169,7 @@ jobs:
             --no-daemon --stacktrace
 
       - name: Package Seforim Bundle (split tar.zst)
-        run: ./gradlew packageSeforimBundle --no-daemon --stacktrace
+        run: ./gradlew packageSeforimBundle -PincludePdf=false -PincludeVectors=false --no-daemon --stacktrace
 
       - name: List bundle parts
         run: |

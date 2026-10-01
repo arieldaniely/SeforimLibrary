@@ -26,7 +26,7 @@ tasks.register<JavaExec>("buildSemanticIndex") {
 
 tasks.register<JavaExec>("buildSemanticIndexFromVectors") {
     group = "application"
-    description = "Build one semantic Lucene shard from GPU-generated vector records"
+    description = "Build a unified semantic Lucene index from GPU-generated vector files"
     dependsOn("jvmJar")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.search.BuildSemanticIndexFromVectorsKt")
     classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
@@ -37,7 +37,8 @@ tasks.register<JavaExec>("buildSemanticIndexFromVectors") {
     val output = providers.gradleProperty("semanticIndexDir")
     argumentProviders.add(CommandLineArgumentProvider {
         listOf(db.get(), model.get(), vectors.get(), output.get(),
-            providers.gradleProperty("shardIndex").get(), providers.gradleProperty("shardCount").get())
+            providers.gradleProperty("shardIndex").orElse("0").get(),
+            providers.gradleProperty("shardCount").orElse("1").get())
     })
     maxHeapSize = "4g"
 }

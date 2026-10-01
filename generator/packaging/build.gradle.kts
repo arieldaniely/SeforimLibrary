@@ -38,7 +38,8 @@ tasks.register<JavaExec>("packageSemanticBundle") {
     val output = providers.gradleProperty("semanticBundleOutput")
     argumentProviders.add(org.gradle.process.CommandLineArgumentProvider {
         listOf(db.get(), model.get(), index.get(), output.get(),
-            providers.gradleProperty("splitPartBytes").orElse("2040109465").get())
+            providers.gradleProperty("splitPartBytes").orElse("2040109465").get(),
+            providers.gradleProperty("zstdLevel").orElse("22").get())
     })
     maxHeapSize = "2g"
 }
@@ -117,6 +118,10 @@ tasks.register<JavaExec>("packageArtifacts") {
         // Default to DB under root build/
         val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
         systemProperty("seforimDb", defaultDbPath)
+    }
+
+    listOf("pdfOnly", "includePdf", "includeVectors", "pdfLibraryDir", "semanticBundleDir").forEach { name ->
+        providers.gradleProperty(name).orNull?.let { systemProperty(name, it) }
     }
 
     // Output bundle

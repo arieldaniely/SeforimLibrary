@@ -28,7 +28,7 @@ fun main(args: Array<String>) {
 
 internal fun buildSemanticIndexFromVectors(args: Array<String>) {
     require(args.size == 6) {
-        "Usage: BuildSemanticIndexFromVectors <seforim.db> <model-dir> <vectors.bin> <output-root> <shard-index> <shard-count>"
+        "Usage: BuildSemanticIndexFromVectors <seforim.db> <model-dir> <vectors.bin-or-directory> <output-root> <shard-index> <shard-count>"
     }
     val db = Path.of(args[0]).toAbsolutePath()
     val modelDir = Path.of(args[1]).toAbsolutePath()
@@ -37,56 +37,74 @@ internal fun buildSemanticIndexFromVectors(args: Array<String>) {
     val shardIndex = args[4].toInt()
     val shardCount = args[5].toInt()
     require(shardCount > 0 && shardIndex in 0 until shardCount)
-    require(Files.isRegularFile(db) && Files.isRegularFile(vectors))
-    val int8 = Files.newInputStream(vectors).use { input ->
-        input.readNBytes(8).contentEquals(Int8Vectors.FILE_MAGIC.toByteArray(Charsets.US_ASCII))
-    }
-    val headerBytes = if (int8) 12L else 0L
-    val recordBytes = if (int8) INT8_RECORD_BYTES else FLOAT_RECORD_BYTES
-    require(Files.size(vectors) >= headerBytes && (Files.size(vectors) - headerBytes) % recordBytes == 0L) {
-        "Truncated vector file: $vectors"
+    require(Files.isRegularFile(db))
+    val vectorFiles = if (Files.isDirectory(vectors)) {
+        require(shardCount == 1) { "Multiple vector files require a unified index" }
+        Files.list(vectors).use { stream ->
+            stream.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".bin") }
+                .sorted()
+                .toList()
+        }
+    } else listOf(vectors)
+    require(vectorFiles.isNotEmpty()) { "No vector files in $vectors" }
+    val inputs = vectorFiles.map { path ->
+        require(Files.isRegularFile(path))
+        val int8 = Files.newInputStream(path).use { input ->
+            input.readNBytes(8).contentEquals(Int8Vectors.FILE_MAGIC.toByteArray(Charsets.US_ASCII))
+        }
+        val headerBytes = if (int8) 12L else 0L
+        val recordBytes = if (int8) INT8_RECORD_BYTES else FLOAT_RECORD_BYTES
+        require(Files.size(path) >= headerBytes && (Files.size(path) - headerBytes) % recordBytes == 0L) {
+            "Truncated vector file: $path"
+        }
+        VectorInput(path, int8, recordBytes, (Files.size(path) - headerBytes) / recordBytes)
     }
     val model = modelDir.resolve("seforim-embed-round2-int8.onnx")
     val tokenizer = modelDir.resolve("tokenizer.json")
     require(Files.isRegularFile(model) && Files.isRegularFile(tokenizer))
-    val expected = (Files.size(vectors) - headerBytes) / recordBytes
+    val expected = inputs.sumOf { it.count }
     require(expected > 0) { "Empty vector file: $vectors" }
     val output = root.resolve("shard-%02d".format(shardIndex))
     Files.createDirectories(output)
-    val record = ByteArray(recordBytes)
+    Files.deleteIfExists(output.resolve("semantic.properties"))
     var indexed = 0L
     FSDirectory.open(output).use { directory ->
         IndexWriter(directory, IndexWriterConfig(StandardAnalyzer()).apply {
             openMode = IndexWriterConfig.OpenMode.CREATE
         }).use { writer ->
-            DataInputStream(BufferedInputStream(Files.newInputStream(vectors), 1 shl 20)).use { input ->
-                if (int8) {
-                    input.skipNBytes(8)
-                    require(Integer.reverseBytes(input.readInt()) == VECTOR_DIMENSION) { "Invalid vector dimension" }
-                }
-                while (indexed < expected) {
-                    input.readFully(record)
-                    val bytes = ByteBuffer.wrap(record).order(ByteOrder.LITTLE_ENDIAN)
-                    val lineId = bytes.long
-                    val bookId = bytes.long
-                    val isBaseBook = bytes.int
-                    require(lineId > 0 && lineId % shardCount == shardIndex.toLong() && bookId > 0)
-                    val vector = if (int8) ByteArray(VECTOR_DIMENSION).also { bytes.get(it) }
-                        else Int8Vectors.quantize(FloatArray(VECTOR_DIMENSION) { bytes.float })
-                    require(vector.any { it != 0.toByte() } && vector.none { it == (-128).toByte() }) {
-                        "Invalid int8 vector for line $lineId"
+            for ((path, int8, recordBytes, count) in inputs) {
+                val record = ByteArray(recordBytes)
+                DataInputStream(BufferedInputStream(Files.newInputStream(path), 1 shl 20)).use { input ->
+                    if (int8) {
+                        input.skipNBytes(8)
+                        require(Integer.reverseBytes(input.readInt()) == VECTOR_DIMENSION) { "Invalid vector dimension" }
                     }
-                    writer.addDocument(Document().apply {
-                        add(StoredField("line_id", lineId))
-                        add(StoredField("book_id", bookId))
-                        add(IntPoint("book_id", bookId.toInt()))
-                        add(IntPoint("is_base_book", isBaseBook))
-                        add(KnnByteVectorField("vec", vector, VectorSimilarityFunction.COSINE))
-                    })
-                    indexed++
-                    if (indexed % 100_000L == 0L) println("shard $shardIndex: indexed $indexed/$expected")
+                    repeat(Math.toIntExact(count)) {
+                        input.readFully(record)
+                        val bytes = ByteBuffer.wrap(record).order(ByteOrder.LITTLE_ENDIAN)
+                        val lineId = bytes.long
+                        val bookId = bytes.long
+                        val isBaseBook = bytes.int
+                        require(lineId > 0 && lineId % shardCount == shardIndex.toLong() && bookId > 0)
+                        val vector = if (int8) ByteArray(VECTOR_DIMENSION).also { bytes.get(it) }
+                            else Int8Vectors.quantize(FloatArray(VECTOR_DIMENSION) { bytes.float })
+                        require(vector.any { it != 0.toByte() } && vector.none { it == (-128).toByte() }) {
+                            "Invalid int8 vector for line $lineId"
+                        }
+                        writer.addDocument(Document().apply {
+                            add(StoredField("line_id", lineId))
+                            add(StoredField("book_id", bookId))
+                            add(IntPoint("book_id", bookId.toInt()))
+                            add(IntPoint("is_base_book", isBaseBook))
+                            add(KnnByteVectorField("vec", vector, VectorSimilarityFunction.COSINE))
+                        })
+                        indexed++
+                        if (indexed % 100_000L == 0L) println("shard $shardIndex: indexed $indexed/$expected")
+                    }
                 }
             }
+            // One HNSW graph for the whole corpus, rather than a KNN traversal per segment.
+            writer.forceMerge(1)
             writer.commit()
         }
     }
@@ -105,3 +123,5 @@ internal fun buildSemanticIndexFromVectors(args: Array<String>) {
     Files.newOutputStream(output.resolve("semantic.properties")).use { properties.store(it, "Zayit Round 2 GPU index") }
     println("Completed shard $shardIndex/$shardCount: $indexed vectors")
 }
+
+private data class VectorInput(val path: Path, val int8: Boolean, val recordBytes: Int, val count: Long)
