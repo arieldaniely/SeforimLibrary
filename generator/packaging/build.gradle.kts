@@ -38,7 +38,8 @@ tasks.register<JavaExec>("packageSemanticBundle") {
     val output = providers.gradleProperty("semanticBundleOutput")
     argumentProviders.add(org.gradle.process.CommandLineArgumentProvider {
         listOf(db.get(), model.get(), index.get(), output.get(),
-            providers.gradleProperty("splitPartBytes").orElse("2040109465").get())
+            providers.gradleProperty("splitPartBytes").orElse("2040109465").get(),
+            providers.gradleProperty("zstdLevel").orElse("22").get())
     })
     maxHeapSize = "2g"
 }
