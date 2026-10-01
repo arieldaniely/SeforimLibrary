@@ -119,6 +119,10 @@ tasks.register<JavaExec>("packageArtifacts") {
         systemProperty("seforimDb", defaultDbPath)
     }
 
+    listOf("pdfOnly", "includePdf", "includeVectors", "pdfLibraryDir", "semanticBundleDir").forEach { name ->
+        providers.gradleProperty(name).orNull?.let { systemProperty(name, it) }
+    }
+
     // Output bundle
     if (project.hasProperty("bundleOutput")) {
         systemProperty("bundleOutput", project.property("bundleOutput") as String)

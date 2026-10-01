@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.packaging
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import com.github.luben.zstd.ZstdOutputStream
+import io.github.kdroidfilter.seforimlibrary.search.VectorSearcher
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.BufferedOutputStream
@@ -88,6 +89,24 @@ fun main(args: Array<String>) {
         logger.w { "Lexical DB missing: $lexicalDbPath (will skip)" }
     }
 
+    val pdfOnly = System.getProperty("pdfOnly", "false").toBooleanStrict()
+    val includePdf = System.getProperty("includePdf", "true").toBooleanStrict()
+    val includeVectors = System.getProperty("includeVectors", "true").toBooleanStrict()
+    val pdfDir = Paths.get(System.getProperty("pdfLibraryDir") ?: dbPath.resolveSibling("תלמוד בבלי").toString())
+    val semanticDir = Paths.get(System.getProperty("semanticBundleDir") ?: "$dbPathStr.semantic")
+    require(!includePdf || pdfDir.toFile().walkTopDown().any { it.isFile && it.extension.equals("pdf", true) }) {
+        "PDF library missing; provide -PpdfLibraryDir or explicitly use -PincludePdf=false"
+    }
+    require(pdfOnly || !includeVectors || (
+        Files.isRegularFile(semanticDir.resolve("model/seforim-embed-round2-int8.onnx")) &&
+            Files.isRegularFile(semanticDir.resolve("model/tokenizer.json")) &&
+            Files.isDirectory(semanticDir.resolve("index"))
+    )) { "Semantic bundle missing; provide -PsemanticBundleDir or explicitly use -PincludeVectors=false" }
+
+    if (!pdfOnly && includeVectors) {
+        VectorSearcher(semanticDir.resolve("index"), 256, dbPath, semanticDir.resolve("model")).use { }
+    }
+
     // Output: single bundle tar.zst
     val legacyOutput = System.getProperty("output") ?: System.getenv("OUTPUT_TAR_ZST")
     val bundleOutputStr = System.getProperty("bundleOutput")
@@ -143,50 +162,54 @@ fun main(args: Array<String>) {
                         tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
                         tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
 
-                        val haveText = textIndexDir.toFile().isDirectory
-                        val haveLookup = lookupIndexDir.toFile().isDirectory
-                        val haveCatalog = catalogPath.exists()
-                        val haveReleaseInfo = releaseInfoPath.exists()
-                        val haveLexicalDb = lexicalDbPath.exists()
+                        if (!pdfOnly) {
+                            val haveText = textIndexDir.toFile().isDirectory
+                            val haveLookup = lookupIndexDir.toFile().isDirectory
+                            val haveCatalog = catalogPath.exists()
+                            val haveReleaseInfo = releaseInfoPath.exists()
+                            val haveLexicalDb = lexicalDbPath.exists()
 
-                        if (haveLookup) {
-                            addDirectoryToTar(tar, lookupIndexDir, lookupIndexDir.fileName.toString(), logger)
-                        } else {
-                            logger.w { "Lucene lookup index directory missing: $lookupIndexDir (skipped)" }
+                            if (haveLookup) {
+                                addDirectoryToTar(tar, lookupIndexDir, lookupIndexDir.fileName.toString(), logger)
+                            } else {
+                                logger.w { "Lucene lookup index directory missing: $lookupIndexDir (skipped)" }
+                            }
+                            if (haveText) {
+                                addDirectoryToTar(tar, textIndexDir, textIndexDir.fileName.toString(), logger)
+                            } else {
+                                logger.w { "Lucene text index directory missing: $textIndexDir (skipped)" }
+                            }
+
+                            // Add the database file itself
+                            addFileToTar(tar, dbPath, dbPath.fileName.toString(), logger)
+
+                            // Add lexical DB if available
+                            if (haveLexicalDb) {
+                                addFileToTar(tar, lexicalDbPath, lexicalDbPath.fileName.toString(), logger)
+                                logger.i { "Added lexical DB to bundle" }
+                            } else {
+                                logger.w { "Lexical DB missing: $lexicalDbPath (skipped)" }
+                            }
+
+                            // Add the precomputed catalog if available
+                            if (haveCatalog) {
+                                addFileToTar(tar, catalogPath, catalogPath.fileName.toString(), logger)
+                                logger.i { "Added precomputed catalog to bundle" }
+                            } else {
+                                logger.w { "Precomputed catalog missing: $catalogPath (skipped)" }
+                            }
+
+                            // Add the release info file if available
+                            if (haveReleaseInfo) {
+                                addFileToTar(tar, releaseInfoPath, releaseInfoPath.fileName.toString(), logger)
+                                logger.i { "Added release info to bundle" }
+                            } else {
+                                logger.w { "Release info file missing: $releaseInfoPath (skipped)" }
+                            }
+
                         }
-                        if (haveText) {
-                            addDirectoryToTar(tar, textIndexDir, textIndexDir.fileName.toString(), logger)
-                        } else {
-                            logger.w { "Lucene text index directory missing: $textIndexDir (skipped)" }
-                        }
-
-                        // Add the database file itself
-                        addFileToTar(tar, dbPath, dbPath.fileName.toString(), logger)
-
-                        // Add lexical DB if available
-                        if (haveLexicalDb) {
-                            addFileToTar(tar, lexicalDbPath, lexicalDbPath.fileName.toString(), logger)
-                            logger.i { "Added lexical DB to bundle" }
-                        } else {
-                            logger.w { "Lexical DB missing: $lexicalDbPath (skipped)" }
-                        }
-
-                        // Add the precomputed catalog if available
-                        if (haveCatalog) {
-                            addFileToTar(tar, catalogPath, catalogPath.fileName.toString(), logger)
-                            logger.i { "Added precomputed catalog to bundle" }
-                        } else {
-                            logger.w { "Precomputed catalog missing: $catalogPath (skipped)" }
-                        }
-
-                        // Add the release info file if available
-                        if (haveReleaseInfo) {
-                            addFileToTar(tar, releaseInfoPath, releaseInfoPath.fileName.toString(), logger)
-                            logger.i { "Added release info to bundle" }
-                        } else {
-                            logger.w { "Release info file missing: $releaseInfoPath (skipped)" }
-                        }
-
+                        if (includePdf) addDirectoryToTar(tar, pdfDir, "תלמוד בבלי", logger)
+                        if (!pdfOnly && includeVectors) addDirectoryToTar(tar, semanticDir, "${dbPath.fileName}.semantic", logger)
                         tar.finish()
                     }
                 }
