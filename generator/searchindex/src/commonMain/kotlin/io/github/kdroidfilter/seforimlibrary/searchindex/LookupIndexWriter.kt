@@ -1,9 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.searchindex
 
 interface LookupIndexWriter : AutoCloseable {
-    /** Removes the book and TOC lookup documents belonging to [bookId]. */
-    fun deleteBookById(bookId: Long) { /* default no-op */ }
-
     fun addBook(
         bookId: Long,
         categoryId: Long,
@@ -13,13 +10,11 @@ interface LookupIndexWriter : AutoCloseable {
         orderIndex: Int? = null
     )
 
-    fun addToc(
-        tocId: Long,
-        bookId: Long,
-        categoryId: Long,
-        bookTitle: String,
-        text: String,
-        level: Int
+    fun addAuthor(
+        authorId: Long,
+        name: String,
+        terms: Collection<String>,
+        bookCount: Int,
     )
 
     fun commit()

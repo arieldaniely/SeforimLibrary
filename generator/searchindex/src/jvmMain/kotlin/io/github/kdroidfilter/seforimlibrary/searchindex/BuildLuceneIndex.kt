@@ -20,8 +20,6 @@ import org.apache.lucene.analysis.TokenStream
 import org.apache.lucene.analysis.core.LowerCaseFilter
 import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper
 import org.apache.lucene.analysis.ngram.NGramTokenFilter
-import org.apache.lucene.index.DirectoryReader
-import org.apache.lucene.store.FSDirectory
 import org.jsoup.Jsoup
 import org.jsoup.safety.Safelist
 import java.io.DataInputStream
@@ -63,26 +61,9 @@ fun main() = runBlocking {
     runCatching { Files.createDirectories(indexDir) }
     runCatching { Files.createDirectories(lookupDir) }
 
-    val incremental = (System.getProperty("incrementalIndex") ?: "false").toBoolean()
-    val includedBookIds: Set<Long>? = System.getProperty("bookIdsFile")?.let { rawPath ->
-        val path = Paths.get(rawPath)
-        require(Files.isRegularFile(path)) { "Book ID list not found at $path" }
-        Files.readAllLines(path)
-            .asSequence()
-            .map(String::trim)
-            .filter(String::isNotEmpty)
-            .map { it.toLong() }
-            .toSet()
-    }
-    if (incremental) {
-        require(includedBookIds != null) { "incrementalIndex requires -DbookIdsFile" }
-        require(indexExists(indexDir)) { "Incremental text index seed is missing or invalid at $indexDir" }
-        require(indexExists(lookupDir)) { "Incremental lookup index seed is missing or invalid at $lookupDir" }
-    }
-
     // Optional dense embeddings -> SINGLE fused index. -DvectorsBin points to a dir
     // with ids.i64 + vecs.f32 + meta.txt (produced by embed_corpus_bin.py against this
-    // same DB). Each line then also gets a KnnFloatVectorField in the text index.
+    // same DB). Each line then also gets an int8 KnnByteVectorField in the text index.
     val vectorProvider: ((Long) -> FloatArray?)? =
         System.getProperty("vectorsBin")?.let { loadVectorProvider(Paths.get(it), logger) }
 
@@ -143,19 +124,9 @@ fun main() = runBlocking {
         )
     )
 
-    LuceneTextIndexWriter(
-        indexDir,
-        analyzer = analyzer,
-        vectorProvider = vectorProvider,
-        append = incremental,
-    ).use { writer ->
-        LuceneLookupIndexWriter(lookupDir, analyzer = analyzer, append = incremental).use { lookup ->
-            // Avoid getAllBooks() in incremental mode: it performs metadata
-            // queries for the entire corpus. Load only the small requested set.
-            val books = includedBookIds
-                ?.sorted()
-                ?.mapNotNull { repo.getBook(it) }
-                ?: repo.getAllBooks()
+    LuceneTextIndexWriter(indexDir, analyzer = analyzer, vectorProvider = vectorProvider).use { writer ->
+        LuceneLookupIndexWriter(lookupDir, analyzer = analyzer).use { lookup ->
+            val books = repo.getAllBooks()
             val indexThreads = (System.getProperty("indexThreads") ?: Runtime.getRuntime().availableProcessors().toString()).toInt().coerceAtLeast(1)
             val workerDispatcher = Dispatchers.Default.limitedParallelism(indexThreads)
             val totalBooks = books.size
@@ -180,12 +151,6 @@ fun main() = runBlocking {
                         book.order.toInt()
                     }
                     try {
-                        // Makes incremental retries idempotent without touching
-                        // documents belonging to the unchanged seed books.
-                        if (incremental) {
-                            writer.deleteBookById(book.id)
-                            lookup.deleteBookById(book.id)
-                        }
                         // Title terms (stored in text index for future use)
                         writer.addBookTitleTerm(book.id, book.categoryId, book.title, book.title)
                         val titleSan = sanitizeAcronymTerm(book.title)
@@ -267,28 +232,24 @@ fun main() = runBlocking {
                             }
                         }
 
-                        // TOC into lookup
-                        runCatching {
-                            val tocs = localRepo.getBookToc(book.id)
-                            for (t in tocs) {
-                                val norm = normalizeForIndexDefault(t.text)
-                                lookup.addToc(
-                                    tocId = t.id,
-                                    bookId = t.bookId,
-                                    categoryId = book.categoryId,
-                                    bookTitle = book.title,
-                                    text = norm,
-                                    level = t.level
-                                )
-                            }
-                        }
-
                         logger.i { "Completed '${book.title}' [$current/$totalBooks | ${globalPct}%]" }
                     } finally {
                         localRepo.close()
                     }
                 }
             }.awaitAll()
+
+            // Authors into lookup: name + aliases, ranked by their number of books
+            val authors = repo.getAuthorsForLookup().filter { it.name.isNotBlank() }
+            for (author in authors) {
+                val terms = (listOf(author.name) + author.aliases)
+                    .flatMap { listOf(it, sanitizeAcronymTerm(it)) }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                lookup.addAuthor(author.id, author.name, terms, author.bookCount)
+            }
+            logger.i { "Indexed ${authors.size} authors into lookup" }
+
             writer.commit()
             lookup.commit()
             logger.i { "Lucene text index built successfully at $indexDir (StandardAnalyzer + 4-gram)" }
@@ -298,8 +259,6 @@ fun main() = runBlocking {
 
     repo.close()
 }
-
-private fun indexExists(path: Path): Boolean = FSDirectory.open(path).use(DirectoryReader::indexExists)
 
 // One-pass normalizer for Lucene indexing. Replaces a chain of 10+ String
 // allocations + a recompiled "\\s+".toRegex() per call with a single char
@@ -350,7 +309,7 @@ private fun sanitizeAcronymTerm(raw: String): String {
 /**
  * Loads dense embeddings produced by embed_corpus_bin.py (ids.i64 + vecs.f32 + meta.txt,
  * little-endian) into RAM and returns a thread-safe lineId -> vector lookup, used by
- * LuceneTextIndexWriter to attach a KnnFloatVectorField per line (single fused index).
+ * LuceneTextIndexWriter to attach an int8 KnnByteVectorField per line (single fused index).
  */
 private fun loadVectorProvider(dir: Path, logger: co.touchlab.kermit.Logger): ((Long) -> FloatArray?) {
     val meta = File(dir.toFile(), "meta.txt").readText().trim().split(" ")

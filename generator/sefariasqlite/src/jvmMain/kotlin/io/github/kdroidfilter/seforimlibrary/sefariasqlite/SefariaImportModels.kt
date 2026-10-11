@@ -41,6 +41,10 @@ internal data class BookMeta(
     // "Rashi on Exodus"…). Used by the density chain to aggregate per-collective
     // signal so volume-level noise doesn't tip the per-pair ratio.
     val collectiveTitleEn: String? = null,
+    // Sefaria `Reference` work (dictionary, lexicon…). It explains words of other
+    // texts without being their base or their commentary, so a link between a
+    // reference work and a non-reference book is never oriented.
+    val isReferenceWork: Boolean = false,
 )
 
 internal data class BookPayload(
@@ -65,6 +69,19 @@ internal data class BookPayload(
     // so that title-pattern base parsing ("X on Y") can resolve "Y" to a bookId
     // when "Y" is a Sefaria-recognised alias (e.g. "Avot" → Pirkei Avot).
     val titleAliasKeys: List<String> = emptyList(),
+    // Top-level Sefaria category is `Reference` (dictionaries, lexicons, bibliographies).
+    val isReferenceWork: Boolean = false,
+    // The Sefaria versions merged into this book (merged.json `title` + `versions`),
+    // joined against versions.json to resolve each version's license.
+    val sefariaTitle: String = enTitle,
+    val versions: List<SefariaVersionRef> = emptyList(),
+    // Sefaria topic slug of each author, keyed by the resolved author name.
+    val authorSlugs: Map<String, String> = emptyMap(),
+)
+
+internal data class SefariaVersionRef(
+    val versionTitle: String,
+    val versionSource: String?,
 )
 
 internal data class RefEntry(

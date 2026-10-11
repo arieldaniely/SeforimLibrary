@@ -3,15 +3,17 @@ package io.github.kdroidfilter.seforimlibrary.packaging
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import com.github.luben.zstd.ZstdOutputStream
-import io.github.kdroidfilter.seforimlibrary.search.VectorSearcher
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.BufferedOutputStream
 import java.io.BufferedInputStream
 import java.io.IOException
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.security.DigestOutputStream
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.Date
 import kotlin.io.path.exists
@@ -89,24 +91,6 @@ fun main(args: Array<String>) {
         logger.w { "Lexical DB missing: $lexicalDbPath (will skip)" }
     }
 
-    val pdfOnly = System.getProperty("pdfOnly", "false").toBooleanStrict()
-    val includePdf = System.getProperty("includePdf", "true").toBooleanStrict()
-    val includeVectors = System.getProperty("includeVectors", "true").toBooleanStrict()
-    val pdfDir = Paths.get(System.getProperty("pdfLibraryDir") ?: dbPath.resolveSibling("תלמוד בבלי").toString())
-    val semanticDir = Paths.get(System.getProperty("semanticBundleDir") ?: "$dbPathStr.semantic")
-    require(!includePdf || pdfDir.toFile().walkTopDown().any { it.isFile && it.extension.equals("pdf", true) }) {
-        "PDF library missing; provide -PpdfLibraryDir or explicitly use -PincludePdf=false"
-    }
-    require(pdfOnly || !includeVectors || (
-        Files.isRegularFile(semanticDir.resolve("model/seforim-embed-round2-int8.onnx")) &&
-            Files.isRegularFile(semanticDir.resolve("model/tokenizer.json")) &&
-            Files.isDirectory(semanticDir.resolve("index"))
-    )) { "Semantic bundle missing; provide -PsemanticBundleDir or explicitly use -PincludeVectors=false" }
-
-    if (!pdfOnly && includeVectors) {
-        VectorSearcher(semanticDir.resolve("index"), 256, dbPath, semanticDir.resolve("model")).use { }
-    }
-
     // Output: single bundle tar.zst
     val legacyOutput = System.getProperty("output") ?: System.getenv("OUTPUT_TAR_ZST")
     val bundleOutputStr = System.getProperty("bundleOutput")
@@ -156,60 +140,58 @@ fun main(args: Array<String>) {
         Files.newOutputStream(bundleOutputPath).use { fos ->
             BufferedOutputStream(fos, 1 shl 20).use { bos ->
                 ZstdOutputStream(bos, zstdLevel).use { zstd ->
+                    // Frame checksum: the decoder detects a corrupted or misordered bundle by itself
+                    zstd.setChecksum(true)
                     runCatching { zstd.setWorkers(workers) }
                         .onFailure { logger.w(it) { "zstd setWorkers($workers) failed; continuing single-threaded" } }
                     TarArchiveOutputStream(zstd).use { tar ->
                         tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
                         tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
 
-                        if (!pdfOnly) {
-                            val haveText = textIndexDir.toFile().isDirectory
-                            val haveLookup = lookupIndexDir.toFile().isDirectory
-                            val haveCatalog = catalogPath.exists()
-                            val haveReleaseInfo = releaseInfoPath.exists()
-                            val haveLexicalDb = lexicalDbPath.exists()
+                        val haveText = textIndexDir.toFile().isDirectory
+                        val haveLookup = lookupIndexDir.toFile().isDirectory
+                        val haveCatalog = catalogPath.exists()
+                        val haveReleaseInfo = releaseInfoPath.exists()
+                        val haveLexicalDb = lexicalDbPath.exists()
 
-                            if (haveLookup) {
-                                addDirectoryToTar(tar, lookupIndexDir, lookupIndexDir.fileName.toString(), logger)
-                            } else {
-                                logger.w { "Lucene lookup index directory missing: $lookupIndexDir (skipped)" }
-                            }
-                            if (haveText) {
-                                addDirectoryToTar(tar, textIndexDir, textIndexDir.fileName.toString(), logger)
-                            } else {
-                                logger.w { "Lucene text index directory missing: $textIndexDir (skipped)" }
-                            }
-
-                            // Add the database file itself
-                            addFileToTar(tar, dbPath, dbPath.fileName.toString(), logger)
-
-                            // Add lexical DB if available
-                            if (haveLexicalDb) {
-                                addFileToTar(tar, lexicalDbPath, lexicalDbPath.fileName.toString(), logger)
-                                logger.i { "Added lexical DB to bundle" }
-                            } else {
-                                logger.w { "Lexical DB missing: $lexicalDbPath (skipped)" }
-                            }
-
-                            // Add the precomputed catalog if available
-                            if (haveCatalog) {
-                                addFileToTar(tar, catalogPath, catalogPath.fileName.toString(), logger)
-                                logger.i { "Added precomputed catalog to bundle" }
-                            } else {
-                                logger.w { "Precomputed catalog missing: $catalogPath (skipped)" }
-                            }
-
-                            // Add the release info file if available
-                            if (haveReleaseInfo) {
-                                addFileToTar(tar, releaseInfoPath, releaseInfoPath.fileName.toString(), logger)
-                                logger.i { "Added release info to bundle" }
-                            } else {
-                                logger.w { "Release info file missing: $releaseInfoPath (skipped)" }
-                            }
-
+                        if (haveLookup) {
+                            addDirectoryToTar(tar, lookupIndexDir, lookupIndexDir.fileName.toString(), logger)
+                        } else {
+                            logger.w { "Lucene lookup index directory missing: $lookupIndexDir (skipped)" }
                         }
-                        if (includePdf) addDirectoryToTar(tar, pdfDir, "תלמוד בבלי", logger)
-                        if (!pdfOnly && includeVectors) addDirectoryToTar(tar, semanticDir, "${dbPath.fileName}.semantic", logger)
+                        if (haveText) {
+                            addDirectoryToTar(tar, textIndexDir, textIndexDir.fileName.toString(), logger)
+                        } else {
+                            logger.w { "Lucene text index directory missing: $textIndexDir (skipped)" }
+                        }
+
+                        // Add the database file itself
+                        addFileToTar(tar, dbPath, dbPath.fileName.toString(), logger)
+
+                        // Add lexical DB if available
+                        if (haveLexicalDb) {
+                            addFileToTar(tar, lexicalDbPath, lexicalDbPath.fileName.toString(), logger)
+                            logger.i { "Added lexical DB to bundle" }
+                        } else {
+                            logger.w { "Lexical DB missing: $lexicalDbPath (skipped)" }
+                        }
+
+                        // Add the precomputed catalog if available
+                        if (haveCatalog) {
+                            addFileToTar(tar, catalogPath, catalogPath.fileName.toString(), logger)
+                            logger.i { "Added precomputed catalog to bundle" }
+                        } else {
+                            logger.w { "Precomputed catalog missing: $catalogPath (skipped)" }
+                        }
+
+                        // Add the release info file if available
+                        if (haveReleaseInfo) {
+                            addFileToTar(tar, releaseInfoPath, releaseInfoPath.fileName.toString(), logger)
+                            logger.i { "Added release info to bundle" }
+                        } else {
+                            logger.w { "Release info file missing: $releaseInfoPath (skipped)" }
+                        }
+
                         tar.finish()
                     }
                 }
@@ -220,13 +202,15 @@ fun main(args: Array<String>) {
         logger.i { "Bundle written: $bundleOutputPath (${"%.2f".format(bundleSizeMb)} MB)" }
         println(bundleOutputPath.toAbsolutePath().toString())
 
-        // Split the bundle into parts of ~1.9 GiB (or configured size)
-        val partCount = splitFile(bundleOutputPath, splitPartBytes, logger)
-        if (partCount > 1) {
-            logger.i { "Bundle split into $partCount parts of up to ${humanSize(splitPartBytes)} each" }
+        // Split the bundle into parts of ~1.9 GiB (or configured size) and describe them
+        val manifest = splitFile(bundleOutputPath, splitPartBytes, logger)
+        if (manifest.parts.size > 1) {
+            logger.i { "Bundle split into ${manifest.parts.size} parts of up to ${humanSize(splitPartBytes)} each" }
         } else {
             logger.i { "Bundle size below split threshold; no split files created" }
         }
+        val manifestPath = manifest.writeNextTo(bundleOutputPath)
+        logger.i { "Bundle manifest written: $manifestPath" }
     } catch (e: Exception) {
         logger.e(e) { "Failed to package artifacts" }
         exitProcess(1)
@@ -283,48 +267,66 @@ private fun addFileToTar(tar: TarArchiveOutputStream, file: Path, entryName: Str
     tar.closeArchiveEntry()
 }
 
-private fun splitFile(source: Path, partSizeBytes: Long, logger: Logger): Int {
-    val size = try { Files.size(source) } catch (e: IOException) { 0L }
-    if (size <= partSizeBytes || size <= 0L) return 1
-
-    val parent = source.parent ?: Paths.get(".")
+/**
+ * Splits [source] into `.partNN` files of at most [partSizeBytes] (no split when it fits in one),
+ * all of the same size except a strictly smaller last one, hashing the bundle and each part in the same pass. Returns the manifest of the files to publish.
+ */
+internal fun splitFile(source: Path, partSizeBytes: Long, logger: Logger): BundleManifest {
+    require(partSizeBytes > 1) { "splitPartBytes must be greater than 1" }
+    val parent = source.toAbsolutePath().parent
     val baseName = source.fileName.toString()
+    val size = Files.size(source)
 
-    val buffer = ByteArray(8 * 1024 * 1024) // 8 MiB
-    var index = 1
-    var bytesInPart = 0L
-    var currentOut: BufferedOutputStream? = null
-
-    fun openNext(): BufferedOutputStream {
-        val suffix = String.format(".part%02d", index)
-        val outPath = parent.resolve(baseName + suffix)
-        val bos = BufferedOutputStream(Files.newOutputStream(outPath), buffer.size)
-        logger.i { "Writing part $index -> ${outPath.toAbsolutePath()}" }
-        return bos
+    // Parts left by a previous run (possibly more of them) must not be published with the new ones
+    Files.list(parent).use { files ->
+        files
+            .filter { file ->
+                val name = file.fileName.toString()
+                name.startsWith(baseName) && PART_NAME.matches(name.removePrefix(baseName))
+            }.forEach(Files::delete)
     }
 
+    val bundleDigest = MessageDigest.getInstance("SHA-256")
+    if (size <= partSizeBytes) {
+        Files.newInputStream(source).use { input -> input.copyTo(DigestOutputStream(OutputStream.nullOutputStream(), bundleDigest)) }
+        val sha = bundleDigest.digest().toHex()
+        return BundleManifest(baseName, size, sha, listOf(BundleManifest.Part(baseName, size, sha)))
+    }
+
+    // Clients without the manifest (offline installs) detect a missing last part because it is the
+    // only one shorter than the others, so never let the last part be full-size.
+    val partSize = if (size % partSizeBytes == 0L) partSizeBytes - 1 else partSizeBytes
+    val parts = mutableListOf<BundleManifest.Part>()
+    val buffer = ByteArray(8 * 1024 * 1024) // 8 MiB
     BufferedInputStream(Files.newInputStream(source), buffer.size).use { input ->
-        currentOut = openNext()
-        while (true) {
-            val remainingInPart = partSizeBytes - bytesInPart
-            val toRead = if (remainingInPart < buffer.size) remainingInPart.toInt() else buffer.size
-            val read = input.read(buffer, 0, toRead)
-            if (read <= 0) break
-            currentOut!!.write(buffer, 0, read)
-            bytesInPart += read
-            if (bytesInPart >= partSizeBytes) {
-                currentOut!!.flush()
-                currentOut!!.close()
-                index += 1
-                bytesInPart = 0
-                currentOut = openNext()
+        var remaining = size
+        while (remaining > 0) {
+            val partName = baseName + String.format(".part%02d", parts.size + 1)
+            val outPath = parent.resolve(partName)
+            val partDigest = MessageDigest.getInstance("SHA-256")
+            val bytes = minOf(partSize, remaining)
+            logger.i { "Writing part ${parts.size + 1} -> $outPath" }
+            BufferedOutputStream(Files.newOutputStream(outPath), buffer.size).use { out ->
+                var left = bytes
+                while (left > 0) {
+                    val read = input.read(buffer, 0, minOf(buffer.size.toLong(), left).toInt())
+                    if (read <= 0) throw IOException("Unexpected end of $source")
+                    out.write(buffer, 0, read)
+                    partDigest.update(buffer, 0, read)
+                    bundleDigest.update(buffer, 0, read)
+                    left -= read
+                }
             }
+            parts += BundleManifest.Part(partName, bytes, partDigest.digest().toHex())
+            remaining -= bytes
         }
     }
-    currentOut?.flush()
-    currentOut?.close()
-    return index
+    return BundleManifest(baseName, size, bundleDigest.digest().toHex(), parts)
 }
+
+private val PART_NAME = Regex("""\.part\d+""")
+
+private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
 private fun humanSize(bytes: Long): String {
     val kb = 1024.0

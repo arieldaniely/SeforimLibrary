@@ -1,7 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
-import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -63,6 +62,55 @@ class SefariaLinksImporterTest {
 
         assertEquals(ConnectionType.SOURCE, forward)
         assertEquals(ConnectionType.COMMENTARY, reverse)
+    }
+
+    // Zayit #503: Sefaria types Otzar La'azei Rashi → Rashi on X rows `commentary`.
+    // The dictionary has no dependence, so it must not become Rashi's base.
+    @Test
+    fun referenceWorkIsNeverOrientedAgainstNonReferenceBook() {
+        val dictionary = BookMeta(isBaseBook = false, categoryLevel = 1, priorityRank = null, isReferenceWork = true)
+        val rashi = BookMeta(
+            isBaseBook = false,
+            categoryLevel = 2,
+            priorityRank = null,
+            dependence = Dependence.COMMENTARY,
+        )
+
+        val (forward, reverse) = resolveDirectionalConnectionTypesForMeta(
+            baseType = ConnectionType.COMMENTARY,
+            sourceBookId = 10L,
+            targetBookId = 20L,
+            sourceMeta = dictionary,
+            targetMeta = rashi
+        )
+
+        assertEquals(ConnectionType.REFERENCE, forward)
+        assertEquals(ConnectionType.REFERENCE, reverse)
+    }
+
+    // A commentary on a dictionary (Hafla'ah she-ba'Arakhin on Sefer HeArukh) stays oriented.
+    @Test
+    fun commentaryInsideReferenceCategoryKeepsOrientation() {
+        val arukh = BookMeta(isBaseBook = false, categoryLevel = 1, priorityRank = null, isReferenceWork = true)
+        val haflaah = BookMeta(
+            isBaseBook = false,
+            categoryLevel = 1,
+            priorityRank = null,
+            dependence = Dependence.COMMENTARY,
+            baseTextBookIds = setOf(10L),
+            isReferenceWork = true,
+        )
+
+        val (forward, reverse) = resolveDirectionalConnectionTypesForMeta(
+            baseType = ConnectionType.COMMENTARY,
+            sourceBookId = 10L,
+            targetBookId = 20L,
+            sourceMeta = arukh,
+            targetMeta = haflaah
+        )
+
+        assertEquals(ConnectionType.COMMENTARY, forward)
+        assertEquals(ConnectionType.SOURCE, reverse)
     }
 
     // When base_text_titles couldn't be resolved (e.g. the base book is not in
@@ -380,29 +428,5 @@ class SefariaLinksImporterTest {
         assertNull(topLevelStructuralIndex("Shabbat 2a"))
         assertNull(topLevelStructuralIndex("Shabbat 2a:5"))
         assertNull(topLevelStructuralIndex("Genesis"))
-    }
-
-    @Test
-    fun incrementalLinkScanFindsExistingNeighbourSchema() {
-        val linksDir = Files.createTempDirectory("incremental-link-scan")
-        Files.writeString(
-            linksDir.resolve("links0.csv"),
-            "Citation 1,Citation 2,Conection Type\n" +
-                "New Commentary 1:1,Genesis 1:1,commentary\n" +
-                "Exodus 1:1,Leviticus 1:1,reference\n",
-        )
-        val genesisSchema = linksDir.resolve("Genesis.json")
-        val schemas = discoverExternalLinkSchemas(
-            linksDir = linksDir,
-            newRefs = listOf(RefEntry("New Commentary 1:1", "חדש א", "new", 1)),
-            schemaLookup = mapOf(
-                "New Commentary" to linksDir.resolve("New_Commentary.json"),
-                "Genesis" to genesisSchema,
-                "Exodus" to linksDir.resolve("Exodus.json"),
-                "Leviticus" to linksDir.resolve("Leviticus.json"),
-            ),
-        )
-
-        assertEquals(setOf(genesisSchema), schemas)
     }
 }

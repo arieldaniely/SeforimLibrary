@@ -110,6 +110,8 @@ class InMemoryIdAllocator private constructor(
     override fun connectionTypeId(name: String): Long = allocateLookup(IdTable.CONNECTION_TYPE, name)
     override fun categoryId(canonicalPath: String): Long = allocateLookup(IdTable.CATEGORY, canonicalPath)
     override fun tocTextId(text: String): Long = allocateLookup(IdTable.TOC_TEXT, text)
+    override fun licenseId(code: String): Long = allocateLookup(IdTable.LICENSE, code)
+    override fun editionId(naturalKey: String): Long = allocateLookup(IdTable.EDITION, naturalKey)
 
     // ─── Composite-keyed accessors ─────────────────────────────────────────────
 
@@ -193,10 +195,24 @@ class InMemoryIdAllocator private constructor(
     override fun peekBookId(sourceName: String, canonicalHeTitle: String): Long? =
         books[BookKey(sourceName, canonicalHeTitle)]
 
+    override fun bookIds(): Map<BookKey, Long> = books.toMap()
+
+    override fun lineHashesByBook(bookIds: Set<Long>): Map<Long, List<ByteArray>> {
+        val out = HashMap<Long, MutableList<ByteArray>>()
+        lines.keys.forEach { key ->
+            if (key.bookId in bookIds) out.getOrPut(key.bookId) { ArrayList() } += key.contentHash
+        }
+        return out
+    }
+
     override fun registerBookAlias(oldKey: BookKey, newKey: BookKey, atVersion: Int) {
         val existing = books[oldKey] ?: return
-        // Move the id under the new natural key so subsequent lookups hit.
-        books.putIfAbsent(newKey, existing)
+        // Move (not copy) the id under the new natural key: id_book.id is UNIQUE,
+        // so keeping it under both keys fails the snapshot. The alias still
+        // resolves the old key.
+        val held = books.putIfAbsent(newKey, existing)
+        check(held == null || held == existing) { "Book alias $oldKey -> $newKey: $newKey already holds id $held" }
+        books.remove(oldKey, existing)
         bookAliases[oldKey] = BookAlias(oldKey, newKey, atVersion)
         logger.i { "Registered book alias: $oldKey -> $newKey (id=$existing, version=$atVersion)" }
     }

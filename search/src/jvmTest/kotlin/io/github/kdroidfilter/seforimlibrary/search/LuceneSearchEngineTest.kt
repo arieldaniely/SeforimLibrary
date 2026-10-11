@@ -7,7 +7,12 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.assertFalse
+import org.apache.lucene.analysis.Analyzer
+import org.apache.lucene.analysis.LowerCaseFilter
+import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper
+import org.apache.lucene.analysis.ngram.NGramTokenFilter
 import org.apache.lucene.analysis.standard.StandardAnalyzer
+import org.apache.lucene.analysis.standard.StandardTokenizer
 import org.apache.lucene.document.Document
 import org.apache.lucene.document.Field
 import org.apache.lucene.document.IntPoint
@@ -106,71 +111,6 @@ class LuceneSearchEngineTest {
     }
 
     // --- openSession tests ---
-
-    @Test
-    fun `exact mode does not match a substring through ngrams`() {
-        val tempDir = createTempIndexDir()
-        try {
-            FSDirectory.open(tempDir).use { dir ->
-                IndexWriter(dir, IndexWriterConfig(StandardAnalyzer())).use { writer ->
-                    writer.addDocument(Document().apply {
-                        add(StringField("type", "line", Field.Store.NO))
-                        add(StoredField("book_id", 1))
-                        add(StoredField("book_title", "ספר בדיקה"))
-                        add(StoredField("line_id", 1))
-                        add(StoredField("line_index", 0))
-                        add(TextField("text", "בראשית", Field.Store.NO))
-                        add(TextField("text_ng4", "ראשי אשית", Field.Store.NO))
-                        add(StoredField("text_raw", "בראשית"))
-                    })
-                }
-            }
-            val engine = LuceneSearchEngine(tempDir)
-            engine.openSession("ראשית", 5, mode = SearchMode.FLEXIBLE)?.use { session ->
-                assertEquals(1, runBlocking { session.nextPage(10) }?.hits?.size)
-            }
-            engine.openSession("ראשית", 5, mode = SearchMode.EXACT)?.use { session ->
-                assertNull(runBlocking { session.nextPage(10) })
-            }
-        } finally {
-            deleteDirectory(tempDir)
-        }
-    }
-
-    @Test
-    fun `exact mode requires words within three intervening words`() {
-        val tempDir = createTempIndexDir()
-        try {
-            FSDirectory.open(tempDir).use { dir ->
-                IndexWriter(dir, IndexWriterConfig(StandardAnalyzer())).use { writer ->
-                    listOf(
-                        "שלום עולם" to 1,
-                        "שלום אחד שנים שלשה עולם" to 2,
-                        "שלום אחד שנים שלשה ארבעה עולם" to 3,
-                    ).forEach { (text, id) ->
-                        writer.addDocument(Document().apply {
-                            add(StringField("type", "line", Field.Store.NO))
-                            add(StoredField("book_id", 1))
-                            add(StoredField("book_title", "ספר בדיקה"))
-                            add(StoredField("line_id", id))
-                            add(StoredField("line_index", id))
-                            add(TextField("text", text, Field.Store.NO))
-                            add(StoredField("text_raw", text))
-                        })
-                    }
-                }
-            }
-            LuceneSearchEngine(tempDir).use { engine ->
-                val session = assertNotNull(engine.openSession("שלום עולם", 5, mode = SearchMode.EXACT))
-                session.use {
-                    val hits = runBlocking { session.nextPage(10) }?.hits.orEmpty()
-                    assertEquals(setOf(1L, 2L), hits.map { it.lineId }.toSet())
-                }
-            }
-        } finally {
-            deleteDirectory(tempDir)
-        }
-    }
 
     @Test
     fun `openSession returns null for blank query`() {
@@ -547,6 +487,46 @@ class LuceneSearchEngineTest {
         }
     }
 
+    // --- findInBookCandidates tests ---
+
+    @Test
+    fun `findInBookCandidates finds a substring inside a word, nikud ignored`() {
+        withFindIndex { engine ->
+            assertEquals(setOf(1L), engine.findInBookCandidates("רֵאשִׁי", bookId = 1)!!.toSet())
+        }
+    }
+
+    @Test
+    fun `findInBookCandidates finds a query starting and ending mid-word`() {
+        withFindIndex { engine ->
+            // "שית" ends a word, "ברא" begins one, "אלהים" is whole
+            assertEquals(setOf(1L), engine.findInBookCandidates("שית ברא אלהים", bookId = 1)!!.toSet())
+        }
+    }
+
+    @Test
+    fun `findInBookCandidates can't answer for a book the index lacks`() {
+        withFindIndex { engine ->
+            assertNull(engine.findInBookCandidates("בראשית", bookId = 99))
+            assertTrue(engine.findInBookCandidates("ויקרא", bookId = 1)!!.isEmpty())
+        }
+    }
+
+    @Test
+    fun `findInBookCandidates stays within the book`() {
+        withFindIndex { engine ->
+            assertEquals(setOf(4L), engine.findInBookCandidates("בראשית", bookId = 2)!!.toSet())
+        }
+    }
+
+    @Test
+    fun `findInBookCandidates can't answer when the query is too short to filter`() {
+        withFindIndex { engine ->
+            assertNull(engine.findInBookCandidates("של", bookId = 1))
+            assertTrue(engine.findInBookCandidates("  ", bookId = 1)!!.isEmpty())
+        }
+    }
+
     // --- Helper methods ---
 
     private fun collectLineIds(session: SearchSession): Set<Long> = runBlocking {
@@ -590,6 +570,125 @@ class LuceneSearchEngineTest {
             }
         }
     }
+
+    private fun withFindIndex(block: (LuceneSearchEngine) -> Unit) {
+        val tempDir = createTempIndexDir()
+        try {
+            // Same analyzers as the generator: standard words + per-word 4-grams
+            val ngram4 = object : Analyzer() {
+                override fun createComponents(fieldName: String): TokenStreamComponents {
+                    val src = StandardTokenizer()
+                    return TokenStreamComponents(src, NGramTokenFilter(LowerCaseFilter(src), 4, 4, false))
+                }
+            }
+            val analyzer = PerFieldAnalyzerWrapper(StandardAnalyzer(), mapOf("text_ng4" to ngram4))
+            FSDirectory.open(tempDir).use { dir ->
+                IndexWriter(dir, IndexWriterConfig(analyzer)).use { writer ->
+                    listOf(
+                        Triple(1L, 1, "בראשית ברא אלהים"),
+                        Triple(2L, 1, "והארץ היתה תהו"),
+                        Triple(3L, 1, "ויברא אלהים את האדם"),
+                        Triple(4L, 2, "בראשית רבה"),
+                    ).forEach { (lineId, bookId, text) ->
+                        val norm = HebrewTextUtils.normalizeHebrew(text)
+                        writer.addDocument(
+                            Document().apply {
+                                add(StringField("type", "line", Field.Store.NO))
+                                add(StoredField("book_id", bookId))
+                                add(IntPoint("book_id", bookId))
+                                add(StoredField("line_id", lineId))
+                                add(IntPoint("line_id", lineId.toInt()))
+                                add(TextField("text", norm, Field.Store.NO))
+                                add(TextField("text_ng4", norm, Field.Store.NO))
+                            },
+                        )
+                    }
+                }
+            }
+            block(LuceneSearchEngine(tempDir))
+        } finally {
+            deleteDirectory(tempDir)
+        }
+    }
+
+    // --- facets ---
+
+    @Test
+    fun `computeFacets counts hits per book and per ancestor category`() {
+        listOf(true, false).forEach { docValues ->
+            withFacetIndex(docValues) { engine ->
+                val facets = assertNotNull(engine.computeFacets("שלום"))
+                assertEquals(6, facets.totalHits)
+                assertEquals(mapOf(1L to 3, 2L to 3), facets.bookCounts)
+                // Book 1 sits in 10 > 11, book 2 in 10 > 12; the delta line of book 1 inherits its ancestors
+                assertEquals(mapOf(10L to 6, 11L to 3, 12L to 3), facets.categoryCounts)
+            }
+        }
+    }
+
+    @Test
+    fun `computeFacets matches the session hit set`() {
+        withFacetIndex(docValues = true) { engine ->
+            val facets = assertNotNull(engine.computeFacets("שלום", baseBookOnly = true))
+            val ids = collectLineIds(assertNotNull(engine.openSession("שלום", baseBookOnly = true)))
+            assertEquals(ids.size.toLong(), facets.totalHits)
+        }
+    }
+
+    @Test
+    fun `pages without snippets get them attached later`() {
+        withFacetIndex(docValues = true) { engine ->
+            runBlocking {
+                val page = assertNotNull(engine.openSession("שלום")?.use { it.nextPage(10, snippets = false) })
+                assertTrue(page.hits.all { it.snippet.isEmpty() })
+                val withSnippets = engine.attachSnippets(page.hits, "שלום", 5)
+                assertEquals(page.hits.map { it.lineId }, withSnippets.map { it.lineId })
+                assertTrue(withSnippets.all { it.snippet.contains("<b>שלום</b>") })
+            }
+        }
+    }
+
+    private fun withFacetIndex(docValues: Boolean, block: (LuceneSearchEngine) -> Unit) {
+        val tempDir = createTempIndexDir()
+        try {
+            FSDirectory.open(tempDir).use { dir ->
+                IndexWriter(dir, IndexWriterConfig(StandardAnalyzer())).use { writer ->
+                    // (lineId, bookId, ancestor category ids)
+                    listOf(
+                        Triple(1L, 1L, "10,11"), Triple(2L, 1L, "10,11"), Triple(3L, 2L, "10,12"),
+                        Triple(4L, 2L, "10,12"), Triple(5L, 2L, "10,12"),
+                    ).forEach { (lineId, bookId, ancestors) ->
+                        writer.addDocument(facetDoc(lineId, bookId, ancestors, "שלום עולם $lineId", docValues))
+                    }
+                    writer.addDocument(facetDoc(6L, 1L, "10,11", "אחר לגמרי", docValues))
+                    writer.commit()
+                    // A line added by a delta update: own segment, no ancestors field
+                    writer.addDocument(facetDoc(7L, 1L, null, "שלום לכולם", docValues))
+                }
+            }
+            block(LuceneSearchEngine(tempDir))
+        } finally {
+            deleteDirectory(tempDir)
+        }
+    }
+
+    private fun facetDoc(lineId: Long, bookId: Long, ancestors: String?, text: String, docValues: Boolean) =
+        Document().apply {
+            add(StringField("type", "line", Field.Store.NO))
+            add(StoredField("book_id", bookId))
+            add(IntPoint("book_id", bookId.toInt()))
+            if (docValues) add(NumericDocValuesField("book_id", bookId))
+            add(StoredField("book_title", "ספר $bookId"))
+            ancestors?.let { add(StoredField("ancestor_category_ids", it)) }
+            add(StoredField("line_id", lineId))
+            add(IntPoint("line_id", lineId.toInt()))
+            add(StoredField("line_index", lineId.toInt()))
+            add(TextField("text", HebrewTextUtils.normalizeHebrew(text), Field.Store.NO))
+            add(StoredField("text_raw", text))
+            add(StoredField("is_base_book", 1))
+            add(IntPoint("is_base_book", 1))
+            add(StoredField("order_index", 1))
+        }
 
     private fun createTempIndexDir(): Path {
         return Files.createTempDirectory("lucene_test_index")

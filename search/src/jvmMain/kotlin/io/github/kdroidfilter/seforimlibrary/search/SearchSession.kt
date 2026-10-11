@@ -1,7 +1,5 @@
 package io.github.kdroidfilter.seforimlibrary.search
 
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emptyFlow
 import java.io.Closeable
 
 /**
@@ -10,7 +8,7 @@ import java.io.Closeable
  * Sessions maintain internal cursor state for efficient pagination using
  * Lucene's searchAfter mechanism. Must be closed when no longer needed
  * to release underlying index reader resources.
- *oui
+ *
  * ## Usage
  * ```kotlin
  * engine.openSession("שלום")?.use { session ->
@@ -29,9 +27,6 @@ import java.io.Closeable
  * @see SearchPage for the structure of returned pages
  */
 interface SearchSession : Closeable {
-    /** Effective mode after loading a page; null when the engine does not report it. */
-    val effectiveMode: SearchMode? get() = null
-
     /**
      * Retrieves the next page of search results.
      *
@@ -39,16 +34,21 @@ interface SearchSession : Closeable {
      * Returns null when all results have been exhausted.
      *
      * @param limit Maximum number of results to return in this page
+     * @param snippets False to skip loading the snippet sources and building the snippets: the hits then carry
+     *   empty `snippet` and `rawText` (cheap ranking, e.g. for fusion or to skip pages); see [SearchEngine.attachSnippets]
      * @return [SearchPage] containing hits and metadata, or null if no more results
      */
-    suspend fun nextPage(limit: Int): SearchPage?
+    suspend fun nextPage(
+        limit: Int,
+        snippets: Boolean = true,
+    ): SearchPage?
 
     /**
-     * Computes optional semantic snippets after [hits] have been displayed, emitting each
-     * updated hit as soon as it is ready. Does not advance the pagination cursor. Collection
-     * is cancellable and may run alongside [nextPage]; engines without enrichment emit nothing.
+     * Snippets better than those of [hits] (from this session's pages) but too costly to build before showing the
+     * page, e.g. the passage closest in meaning: lineId to snippet, for the hits that have one. Callers swap them in
+     * once ready; empty when the session has none.
      */
-    fun highlightUpdates(hits: List<LineHit>): Flow<LineHit> = emptyFlow()
+    suspend fun refinedSnippets(hits: List<LineHit>): Map<Long, String> = emptyMap()
 }
 
 /**

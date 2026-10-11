@@ -18,30 +18,10 @@ kotlin {
 
         jvmMain.dependencies {
             implementation(project(":generator-common"))
-            implementation(project(":search"))
             implementation(libs.zstd)
             implementation(libs.commons.compress)
         }
     }
-}
-
-tasks.register<JavaExec>("packageSemanticBundle") {
-    group = "application"
-    description = "Package a complete local Round 2 index and model as tar.zst, splitting only when needed"
-    workingDir = layout.projectDirectory.asFile
-    dependsOn("jvmJar")
-    mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.PackageSemanticBundleKt")
-    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
-    val db = providers.gradleProperty("seforimDb").orElse(providers.environmentVariable("SEFORIM_DB"))
-    val model = providers.gradleProperty("semanticModelDir")
-    val index = providers.gradleProperty("semanticIndexDir")
-    val output = providers.gradleProperty("semanticBundleOutput")
-    argumentProviders.add(org.gradle.process.CommandLineArgumentProvider {
-        listOf(db.get(), model.get(), index.get(), output.get(),
-            providers.gradleProperty("splitPartBytes").orElse("2040109465").get(),
-            providers.gradleProperty("zstdLevel").orElse("22").get())
-    })
-    maxHeapSize = "2g"
 }
 
 // Write release information to release_info.txt file
@@ -118,10 +98,6 @@ tasks.register<JavaExec>("packageArtifacts") {
         // Default to DB under root build/
         val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
         systemProperty("seforimDb", defaultDbPath)
-    }
-
-    listOf("pdfOnly", "includePdf", "includeVectors", "pdfLibraryDir", "semanticBundleDir").forEach { name ->
-        providers.gradleProperty(name).orNull?.let { systemProperty(name, it) }
     }
 
     // Output bundle

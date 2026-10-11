@@ -3,18 +3,26 @@ package io.github.kdroidfilter.seforimlibrary.searchindex.lucene
 import io.github.kdroidfilter.seforimlibrary.searchindex.TextIndexWriter
 import org.apache.lucene.analysis.Analyzer
 import org.apache.lucene.analysis.standard.StandardAnalyzer
+import org.apache.lucene.codecs.KnnVectorsFormat
+import org.apache.lucene.codecs.lucene104.Lucene104Codec
+import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat
 import org.apache.lucene.document.Document
 import org.apache.lucene.document.Field
 import org.apache.lucene.document.IntPoint
-import org.apache.lucene.document.KnnFloatVectorField
+import org.apache.lucene.document.KnnByteVectorField
+import org.apache.lucene.document.NumericDocValuesField
 import org.apache.lucene.document.StoredField
 import org.apache.lucene.document.StringField
 import org.apache.lucene.document.TextField
 import org.apache.lucene.index.IndexWriter
 import org.apache.lucene.index.IndexWriterConfig
-import org.apache.lucene.index.NoMergePolicy
+import org.apache.lucene.index.VectorSimilarityFunction
 import org.apache.lucene.store.FSDirectory
 import java.nio.file.Path
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * Lucene-backed implementation of [TextIndexWriter].
@@ -27,16 +35,20 @@ class LuceneTextIndexWriter(
     analyzer: Analyzer = StandardAnalyzer(),
     private val indexHebrewField: Boolean = false,
     private val indexPrimaryText: Boolean = true,
-    // Optional dense embeddings: if provided, each line doc also gets a
-    // KnnFloatVectorField("vec", COSINE) -> SINGLE index holding text + vectors.
+    // Optional dense embeddings: if provided, each line doc also gets an int8
+    // KnnByteVectorField("vec", COSINE) -> SINGLE index holding text + vectors.
     private val vectorProvider: ((Long) -> FloatArray?)? = null,
-    append: Boolean = false,
+    // Merge to a single segment on close: one HNSW graph and one term dictionary to search instead of dozens
+    private val forceMerge: Boolean = true,
 ) : TextIndexWriter {
     companion object Fields {
         const val FIELD_TYPE = "type"
         const val TYPE_LINE = "line"
         const val TYPE_BOOK_TITLE = "book_title"
+        // Base-book lines get their own vector field: the default search is restricted to base books (~4% of the
+        // lines), which a filter on one shared graph serves badly; a search over all lines queries both fields
         const val FIELD_VEC = "vec"
+        const val FIELD_VEC_BASE = "vec_base"
 
         const val FIELD_BOOK_ID = "book_id"
         const val FIELD_CATEGORY_ID = "category_id"
@@ -55,14 +67,20 @@ class LuceneTextIndexWriter(
 
     private val dir = FSDirectory.open(indexDir)
     private val writer: IndexWriter
+    private val mergeWorkers = Runtime.getRuntime().availableProcessors()
+    private val mergeExecutor: ExecutorService = Executors.newFixedThreadPool(mergeWorkers)
 
     init {
+        // Plain HNSW over byte vectors: the vectors are quantized to int8 before indexing, so the index holds only
+        // the bytes (Lucene's quantized formats would keep the raw floats next to them, 4x the size)
+        val vectorsFormat = Lucene99HnswVectorsFormat(16, 100, mergeWorkers, mergeExecutor)
         val cfg = IndexWriterConfig(analyzer).apply {
-            openMode = if (append) IndexWriterConfig.OpenMode.CREATE_OR_APPEND else IndexWriterConfig.OpenMode.CREATE
-            // An incremental release adds a small segment to a multi-GB seed
-            // index. Merging old segments here is unnecessary and can exceed
-            // the memory/disk limits of a free GitHub Actions runner.
-            if (append) mergePolicy = NoMergePolicy.INSTANCE
+            openMode = IndexWriterConfig.OpenMode.CREATE
+            codec = object : Lucene104Codec() {
+                override fun getKnnVectorsFormatForField(field: String): KnnVectorsFormat = vectorsFormat
+            }
+            // Fewer, larger flushed segments: every merge of vector segments rebuilds a graph
+            ramBufferSizeMB = 1024.0
         }
         writer = IndexWriter(dir, cfg)
     }
@@ -85,6 +103,8 @@ class LuceneTextIndexWriter(
 
             add(StoredField(FIELD_BOOK_ID, bookId))
             add(IntPoint(FIELD_BOOK_ID, bookId.toInt()))
+            // Doc values: the search facets count hits per book without reading stored fields
+            add(NumericDocValuesField(FIELD_BOOK_ID, bookId))
             add(StoredField(FIELD_CATEGORY_ID, categoryId))
             add(IntPoint(FIELD_CATEGORY_ID, categoryId.toInt()))
             add(StoredField(FIELD_BOOK_TITLE, bookTitle))
@@ -118,9 +138,10 @@ class LuceneTextIndexWriter(
             add(TextField(FIELD_TEXT_NG4, normalizedText, Field.Store.NO))
             // rawPlainText is no longer stored - snippet source is fetched from DB at query time
 
-            // Dense embedding (single fused index): attach the line's vector if available.
+            // Dense embedding (single fused index): attach the line's int8 vector if available.
             vectorProvider?.invoke(lineId)?.let { vec ->
-                add(KnnFloatVectorField(FIELD_VEC, vec, org.apache.lucene.index.VectorSimilarityFunction.COSINE))
+                val field = if (isBaseBook) FIELD_VEC_BASE else FIELD_VEC
+                add(KnnByteVectorField(field, quantizeInt8(vec), VectorSimilarityFunction.COSINE))
             }
         }
         writer.addDocument(doc)
@@ -131,16 +152,14 @@ class LuceneTextIndexWriter(
             add(StringField(FIELD_TYPE, TYPE_BOOK_TITLE, Field.Store.NO))
             add(StoredField(FIELD_BOOK_ID, bookId))
             add(IntPoint(FIELD_BOOK_ID, bookId.toInt()))
+            // Same schema as the line documents (Lucene requires one per field)
+            add(NumericDocValuesField(FIELD_BOOK_ID, bookId))
             add(StoredField(FIELD_CATEGORY_ID, categoryId))
             add(IntPoint(FIELD_CATEGORY_ID, categoryId.toInt()))
             add(StoredField(FIELD_BOOK_TITLE, displayTitle))
             add(TextField(FIELD_TITLE, term, Field.Store.NO))
         }
         writer.addDocument(doc)
-    }
-
-    override fun deleteBookById(bookId: Long) {
-        writer.deleteDocuments(IntPoint.newExactQuery(FIELD_BOOK_ID, bookId.toInt()))
     }
 
     override fun deleteLineById(lineId: Long) {
@@ -154,8 +173,23 @@ class LuceneTextIndexWriter(
         writer.commit()
     }
 
+    // Scales each vector so its largest component maps to 127: COSINE ignores the scale, so every vector gets the
+    // full int8 range (cosine to the float vector >= 0.9999 on the corpus)
+    private fun quantizeInt8(vec: FloatArray): ByteArray {
+        val max = vec.maxOf { abs(it) }.takeIf { it > 0f } ?: return ByteArray(vec.size)
+        return ByteArray(vec.size) { i -> (vec[i] * 127f / max).roundToInt().toByte() }
+    }
+
     override fun close() {
-        writer.close()
-        dir.close()
+        try {
+            if (forceMerge) {
+                writer.forceMerge(1)
+                writer.commit()
+            }
+            writer.close()
+        } finally {
+            mergeExecutor.shutdown()
+            dir.close()
+        }
     }
 }

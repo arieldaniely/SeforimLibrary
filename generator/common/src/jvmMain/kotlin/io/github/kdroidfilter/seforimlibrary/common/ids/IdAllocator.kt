@@ -31,6 +31,8 @@ interface IdAllocator {
     fun connectionTypeId(name: String): Long
     fun categoryId(canonicalPath: String): Long
     fun tocTextId(text: String): Long
+    fun licenseId(code: String): Long
+    fun editionId(naturalKey: String): Long
 
     // ─── Composite-keyed tables ────────────────────────────────────────────────
     fun bookId(sourceName: String, canonicalHeTitle: String): Long
@@ -42,6 +44,12 @@ interface IdAllocator {
 
     /** Returns the previously-allocated id for the given key, or `null` if unknown. */
     fun peekBookId(sourceName: String, canonicalHeTitle: String): Long?
+
+    /** Copy of every known book key and its id, aliased keys included. */
+    fun bookIds(): Map<BookKey, Long>
+
+    /** Line content hashes (20-byte sha1) known for each of [bookIds]. */
+    fun lineHashesByBook(bookIds: Set<Long>): Map<Long, List<ByteArray>>
 
     /**
      * Records a book rename detected at the current build version.

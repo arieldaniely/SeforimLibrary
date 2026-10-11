@@ -283,6 +283,60 @@ class MagicDictionaryIndexTest {
         }
     }
 
+    @Test
+    fun `expansion prefers an entry the token is a form of over a larger one reached by a variant`() {
+        val tempFile = createValidTestDatabase()
+        try {
+            DriverManager.getConnection("jdbc:sqlite:${tempFile.toAbsolutePath()}").use { conn ->
+                conn.createStatement().use { stmt ->
+                    // לעולם is a form of עולם, and a variant of a form of the much larger יום
+                    stmt.execute("INSERT INTO base (id, value) VALUES (1, 'עולם'), (2, 'יום')")
+                    stmt.execute("INSERT INTO surface (id, value, base_id) VALUES (1, 'לעולם', 1), (2, 'עולם', 1)")
+                    stmt.execute(
+                        "INSERT INTO surface (id, value, base_id) VALUES (3, 'ימים', 2), (4, 'יומא', 2), (5, 'ביום', 2), (6, 'יום', 2)"
+                    )
+                    stmt.execute("INSERT INTO variant (id, value) VALUES (1, 'לעולם')")
+                    stmt.execute("INSERT INTO surface_variant (surface_id, variant_id) VALUES (3, 1)")
+                }
+            }
+            val index = assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile))
+            assertEquals(listOf("עולם"), assertNotNull(index.expansionFor("לעולם")).base)
+        } finally {
+            Files.deleteIfExists(tempFile)
+        }
+    }
+
+    @Test
+    fun `an ambiguous surface expands to each lemma it is a form of`() {
+        val tempFile = createValidTestDatabase()
+        try {
+            DriverManager.getConnection("jdbc:sqlite:${tempFile.toAbsolutePath()}").use { conn ->
+                conn.createStatement().use { stmt ->
+                    // פנינו is "we turned" (פנה) and "our face" (פנים)
+                    stmt.execute("INSERT INTO base (id, value) VALUES (1, 'פנה'), (2, 'פנים')")
+                    stmt.execute("INSERT INTO surface (id, value, base_id) VALUES (1, 'פנינו', 1), (2, 'פנו', 1)")
+                    stmt.execute("INSERT INTO surface (id, value, base_id) VALUES (3, 'פניו', 2), (4, 'פני', 2)")
+                    stmt.execute("INSERT INTO variant (id, value) VALUES (1, 'פונה')")
+                    stmt.execute("INSERT INTO surface_variant (surface_id, variant_id) VALUES (1, 1)")
+                    stmt.execute("CREATE TABLE surface_extra_base (surface_id INTEGER NOT NULL, base_id INTEGER NOT NULL)")
+                    stmt.execute("INSERT INTO surface_extra_base (surface_id, base_id) VALUES (1, 2)")
+                }
+            }
+            val index = assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile))
+
+            val expansions = index.expansionsFor(listOf("פנינו"))
+            assertEquals(setOf("פנה", "פנים"), expansions.flatMap { it.base }.toSet())
+            val faces = expansions.single { it.base == listOf("פנים") }
+            assertTrue("פנינו" in faces.inflections)
+            // The surface's variants belong to its primary reading only
+            assertTrue("פונה" !in faces.surface)
+            // The other lemma's own words reach the ambiguous form too
+            assertTrue("פנינו" in assertNotNull(index.expansionFor("פניו")).surface)
+        } finally {
+            Files.deleteIfExists(tempFile)
+        }
+    }
+
     // --- Caching tests ---
 
     @Test

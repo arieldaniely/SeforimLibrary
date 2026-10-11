@@ -26,7 +26,7 @@ internal class SefariaLinksImporter(
         lineIdToBookId: Map<Long, Long>,
         bookMetaById: Map<Long, BookMeta>,
         headingLineIds: Set<Long> = emptySet(),
-        requiredBookIds: Set<Long>? = null,
+        onLinkStored: (Link) -> Unit = {},
     ) = coroutineScope {
         // Pre-register all connection types we'll use so their ids are stable
         // (so `link.connectionTypeId` is reproducible across builds).
@@ -52,7 +52,6 @@ internal class SefariaLinksImporter(
                     lineIdToBookId = lineIdToBookId,
                     bookMetaById = bookMetaById,
                     headingLineIds = headingLineIds,
-                    requiredBookIds = requiredBookIds,
                     linkChannel = linkChannel
                 )
             }
@@ -62,6 +61,7 @@ internal class SefariaLinksImporter(
         val inserter = launch {
             val batch = mutableListOf<Link>()
             for (link in linkChannel) {
+                onLinkStored(link)
                 batch += link
                 if (batch.size >= SefariaImportTuning.LINK_BATCH_SIZE) {
                     repository.insertLinksBatch(batch)
@@ -90,7 +90,6 @@ internal class SefariaLinksImporter(
         lineIdToBookId: Map<Long, Long>,
         bookMetaById: Map<Long, BookMeta>,
         headingLineIds: Set<Long>,
-        requiredBookIds: Set<Long>?,
         linkChannel: Channel<Link>
     ) {
         Files.newBufferedReader(file).use { reader ->
@@ -134,9 +133,6 @@ internal class SefariaLinksImporter(
                         if (srcLine in headingLineIds || tgtLine in headingLineIds) continue
                         val srcBookId = lineBookId(srcLine, lineIdToBookId)
                         val tgtBookId = lineBookId(tgtLine, lineIdToBookId)
-                        if (requiredBookIds != null &&
-                            srcBookId !in requiredBookIds && tgtBookId !in requiredBookIds
-                        ) continue
                         // Upgrade blank/none Conection Type to a schema-derived
                         // type when one side explicitly declares the other as
                         // its base text. Without this, ~1.5M legitimate
@@ -236,6 +232,36 @@ internal class SefariaLinksImporter(
                 }
             }
         }
+    }
+
+    /**
+     * Stores the [anchors] of a sparsely linked commentary as COMMENTARY links from its base
+     * text. See [anchorUnlinkedCommentaryLines].
+     */
+    suspend fun insertCommentaryAnchors(
+        commentary: SparseCommentary,
+        anchors: List<CommentaryAnchor>,
+        bookMetaById: Map<Long, BookMeta>,
+    ) {
+        val typeId = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
+        val isDeclaredBase = bookMetaById[commentary.commentaryBookId]
+            ?.sefariaDeclaredBaseTextBookIds
+            ?.contains(commentary.baseBookId) == true
+        anchors
+            .map { anchor ->
+                Link(
+                    id = bindings.allocator.linkId(anchor.baseLineId, anchor.commentaryLine.lineId, typeId),
+                    sourceBookId = commentary.baseBookId,
+                    targetBookId = commentary.commentaryBookId,
+                    sourceLineId = anchor.baseLineId,
+                    targetLineId = anchor.commentaryLine.lineId,
+                    targetLineIndex = anchor.commentaryLine.lineIndex,
+                    connectionType = ConnectionType.COMMENTARY,
+                    isDeclaredBase = isDeclaredBase,
+                )
+            }
+            .chunked(SefariaImportTuning.LINK_BATCH_SIZE)
+            .forEach { repository.insertLinksBatch(it) }
     }
 
     private data class StoredLink(
@@ -552,8 +578,6 @@ private val ORIENTED_DEPENDANT_TYPES = setOf(
     ConnectionType.MIDRASH,
     ConnectionType.PARSHANUT,
     ConnectionType.DIBUR_HAMATCHIL,
-    ConnectionType.ELUCIDATION,
-    ConnectionType.EXPLICATION,
     // Ein Mishpat / Ner Mitzvah is the standard halakhic-index layer on the
     // Talmud folio that anchors each sugya to the matching halakhah in
     // Mishneh Torah / Tur / Shulchan Arukh / Sefer Mitzvot Gadol. Sefaria
@@ -597,6 +621,15 @@ internal fun resolveDirectionalConnectionTypesForMeta(
 
     if (sourceMeta == null || targetMeta == null) {
         return baseType to baseType
+    }
+
+    // A reference work (e.g. Otzar La'azei Rashi, a dictionary of Rashi's Old French
+    // glosses) is neither the base nor a commentary of the texts it explains. Sefaria
+    // still types those rows `commentary`, and since a dictionary has no `dependence`
+    // the asymmetry below would make it Rashi's base (Zayit issue #503). Links inside
+    // the reference category (Hafla'ah she-ba'Arakhin on Sefer HeArukh) stay oriented.
+    if (sourceMeta.isReferenceWork != targetMeta.isReferenceWork) {
+        return ConnectionType.REFERENCE to ConnectionType.REFERENCE
     }
 
     // (1) Strongest signal: explicit base_text_titles declaration.

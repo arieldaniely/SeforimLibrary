@@ -202,22 +202,15 @@ tasks.register<JavaExec>("appendOtzariaLines") {
     }
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
-    // Keep the historical in-memory default for local generation, but allow
-    // resource-constrained CI to append directly to the existing file with
-    // -PinMemoryDb=false (avoids cloning the multi-GB seed DB into RAM).
-    val useMemoryDb = (project.findProperty("inMemoryDb") as String?)?.toBooleanStrictOrNull() ?: true
-    args(if (useMemoryDb) ":memory:" else baseDb)
-    systemProperty("inMemoryDb", useMemoryDb.toString())
+    // Use in-memory DB for speed; seed from baseDb; persist to persistDb (can equal baseDb)
+    args(":memory:")
     systemProperty("appendExistingDb", "true")
-    systemProperty("onlyMissingBooks", "true")
     systemProperty("baseDb", baseDb)
     systemProperty("persistDb", persistDb)
-    if (project.hasProperty("buildStatePath")) {
-        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    // Accept previous books changing id instead of failing (see BookIdContinuity).
+    if (project.hasProperty("allowBookIdLoss")) {
+        systemProperty("allowBookIdLoss", project.property("allowBookIdLoss") as String)
     }
-    val newBookIdsFile = (project.findProperty("newBookIdsFile") as String?)
-        ?: rootProject.layout.buildDirectory.file("otzaria-new-book-ids.txt").get().asFile.absolutePath
-    systemProperty("newBookIdsFile", newBookIdsFile)
 
     val defaultAcronymDb = layout.buildDirectory.file("acronymizer/acronymizer.db").get().asFile.absolutePath
     if (project.hasProperty("acronymDb")) {
@@ -256,17 +249,9 @@ tasks.register<JavaExec>("appendOtzariaLinks") {
     }
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
-    val useMemoryDb = (project.findProperty("inMemoryDb") as String?)?.toBooleanStrictOrNull() ?: true
-    args(if (useMemoryDb) ":memory:" else persistDb)
-    systemProperty("inMemoryDb", useMemoryDb.toString())
+    args(":memory:")
     systemProperty("baseDb", persistDb)
     systemProperty("persistDb", persistDb)
-    if (project.hasProperty("buildStatePath")) {
-        systemProperty("buildStatePath", project.property("buildStatePath") as String)
-    }
-    val newBookIdsFile = (project.findProperty("newBookIdsFile") as String?)
-        ?: rootProject.layout.buildDirectory.file("otzaria-new-book-ids.txt").get().asFile.absolutePath
-    systemProperty("newBookIdsFile", newBookIdsFile)
 
     if (project.hasProperty("sourceDir")) {
         systemProperty("sourceDir", project.property("sourceDir") as String)
@@ -304,14 +289,6 @@ tasks.register<JavaExec>("generateHavroutaLinks") {
         rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
     }
     args(defaultDbPath)
-
-    if (project.hasProperty("buildStatePath")) {
-        systemProperty("buildStatePath", project.property("buildStatePath") as String)
-    }
-
-    (project.findProperty("newBookIdsFile") as String?)?.let {
-        systemProperty("newBookIdsFile", it)
-    }
 
     // Bumped from 4g → 10g: the IdAllocator now loads a fully populated
     // id_lookup (author/topic/pub_place/pub_date/toc_text) on top of the

@@ -6,6 +6,10 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.PreparedStatement
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Streaming dictionary index backed by SQLite (tables: surface, variant, base).
@@ -17,10 +21,16 @@ class MagicDictionaryIndex private constructor(
     private val norm: (String) -> String,
     private val dbFile: Path
 ) {
+    /**
+     * The forms a token expands to. [surface] holds every form (inflections, then the dictionary's variants, then
+     * the base) as the ranking uses them; [inflections] only the base's inflected forms and the base itself: the
+     * variants also hold loose associations (יום for הוא), so they don't count as the same word.
+     */
     data class Expansion(
         val surface: List<String>,
         val variants: List<String>,
-        val base: List<String>
+        val base: List<String>,
+        val inflections: List<String> = emptyList()
     )
 
     private val url = "jdbc:sqlite:${dbFile.toAbsolutePath()}"
@@ -34,17 +44,21 @@ class MagicDictionaryIndex private constructor(
             // Enforce read-only queries without altering connection flags post-open
             createStatement().use { stmt -> stmt.execute("PRAGMA query_only=ON") }
         }
+        // Dictionaries since v0.4.2 list the extra lemmas of ambiguous surfaces (פנינו: פנה and פנים)
+        val sql = if (conn.hasTable(EXTRA_BASE_TABLE)) LOOKUP_WITH_EXTRA_BASES_SQL else LOOKUP_SQL
         LookupContext(
             conn = conn,
-            stmt = conn.prepareStatement(LOOKUP_SQL)
+            stmt = conn.prepareStatement(sql),
+            paramCount = sql.count { it == '?' }
         )
     }
 
     /**
-     * Cache expansions per normalized token to avoid repeated DB hits.
+     * Cache expansions per normalized token to avoid repeated DB hits. Lookups in progress are cached too, so
+     * concurrent searches (facets and results start together) share them.
      */
-    private val tokenCache = object : LinkedHashMap<String, List<Expansion>>(TOKEN_CACHE_SIZE, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Expansion>>?): Boolean =
+    private val tokenCache = object : LinkedHashMap<String, CompletableFuture<List<Expansion>>>(TOKEN_CACHE_SIZE, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CompletableFuture<List<Expansion>>>?): Boolean =
             size > TOKEN_CACHE_SIZE
     }
 
@@ -55,6 +69,11 @@ class MagicDictionaryIndex private constructor(
     private val baseCache = object : LinkedHashMap<Long, Expansion>(BASE_CACHE_SIZE, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Expansion>?): Boolean =
             size > BASE_CACHE_SIZE
+    }
+
+    /** Starts looking up [tokens] in parallel, so the following [expansionFor] calls find them ready. */
+    fun prefetch(tokens: Collection<String>) {
+        tokens.forEach { lookup(it, async = true) }
     }
 
     fun expansionsFor(tokens: List<String>): List<Expansion> =
@@ -71,18 +90,33 @@ class MagicDictionaryIndex private constructor(
         }
         if (matchingBase != null) return matchingBase
 
-        // Otherwise, prefer the largest expansion (more terms = more complete paradigm)
-        return expansions.maxByOrNull { it.surface.size }
+        // Then the entries the token truly is a form of: one reached only through a dictionary variant (loose
+        // associations: לעולם to יום) isn't the token's paradigm, however large
+        val ownEntries = expansions.filter { exp -> exp.inflections.any { it == normalized } }
+
+        // The largest of them (more terms = more complete paradigm)
+        return ownEntries.ifEmpty { expansions }.maxByOrNull { it.surface.size }
     }
 
-    private fun expansionsForToken(token: String): List<Expansion> {
-        val normalized = norm(token)
-        if (normalized.isEmpty()) return emptyList()
+    private fun expansionsForToken(token: String): List<Expansion> = lookup(token, async = false).join()
 
+    private fun lookup(token: String, async: Boolean): CompletableFuture<List<Expansion>> {
+        val normalized = norm(token)
+        if (normalized.isEmpty()) return CompletableFuture.completedFuture(emptyList())
+        val future = CompletableFuture<List<Expansion>>()
         synchronized(tokenCache) {
             tokenCache[normalized]?.let { return it }
+            tokenCache[normalized] = future
         }
+        val fetch = Runnable {
+            // fetchExpansions logs and skips its failures: an empty result is cached like any other
+            future.complete(runCatching { fetchForToken(token, normalized) }.getOrDefault(emptyList()))
+        }
+        if (async) lookupExecutor.execute(fetch) else fetch.run()
+        return future
+    }
 
+    private fun fetchForToken(token: String, normalized: String): List<Expansion> {
         // Try raw, normalized, and final-form variants to match DB values.
         val candidates = buildLookupCandidates(token, normalized)
         val mergedByBase = LinkedHashMap<Long, Expansion>()
@@ -97,16 +131,12 @@ class MagicDictionaryIndex private constructor(
                     val surfaces = (existing.surface + exp.surface).distinct()
                     val variants = (existing.variants + exp.variants).distinct()
                     val base = (existing.base + exp.base).distinct()
-                    mergedByBase[baseId] = Expansion(surfaces, variants, base)
+                    val inflections = (existing.inflections + exp.inflections).distinct()
+                    mergedByBase[baseId] = Expansion(surfaces, variants, base, inflections)
                 }
             }
         }
-
-        val expansions = mergedByBase.values.toList()
-        synchronized(tokenCache) {
-            tokenCache[normalized] = expansions
-        }
-        return expansions
+        return mergedByBase.values.toList()
     }
 
     /**
@@ -118,7 +148,7 @@ class MagicDictionaryIndex private constructor(
 
         runCatching {
             synchronized(ctx) {
-                repeat(3) { idx -> ctx.stmt.setString(idx + 1, rawToken) }
+                repeat(ctx.paramCount) { idx -> ctx.stmt.setString(idx + 1, rawToken) }
                 val rs = ctx.stmt.executeQuery()
                 val accum = mutableMapOf<Long, BaseBucket>()
                 while (rs.next()) {
@@ -154,7 +184,8 @@ class MagicDictionaryIndex private constructor(
                     val exp = Expansion(
                         surface = allTerms,
                         variants = emptyList(),
-                        base = baseTerms
+                        base = baseTerms,
+                        inflections = (surfaceN + baseTerms).distinct()
                     )
 
                     synchronized(baseCache) {
@@ -173,6 +204,14 @@ class MagicDictionaryIndex private constructor(
     companion object {
         private val logger = Logger.withTag("MagicDictionary")
         private const val TOKEN_CACHE_SIZE = 1024
+
+        // Parallel lookups of a query's words (each thread keeps its own connection)
+        private val lookupExecutor: ExecutorService by lazy {
+            val ids = AtomicInteger()
+            Executors.newFixedThreadPool(minOf(Runtime.getRuntime().availableProcessors(), 4)) { task ->
+                Thread(task, "magic-dictionary-${ids.incrementAndGet()}").apply { isDaemon = true }
+            }
+        }
         private const val BASE_CACHE_SIZE = 512
 
         /**
@@ -254,11 +293,57 @@ class MagicDictionaryIndex private constructor(
             LEFT JOIN surface_variant sv ON sv.surface_id = s.id
             LEFT JOIN variant v ON sv.variant_id = v.id
         """
+
+        private const val EXTRA_BASE_TABLE = "surface_extra_base"
+
+        /**
+         * [LOOKUP_SQL] plus the extra lemmas of ambiguous surfaces: a token matches every lemma it is a form of, and
+         * such a surface counts among the forms of each. Its variants stay with its primary lemma only, as they hold
+         * associations of that reading.
+         */
+        private const val LOOKUP_WITH_EXTRA_BASES_SQL = """
+            WITH matches AS (
+                SELECT s.base_id AS base_id FROM surface s WHERE s.value = ?
+                UNION
+                SELECT e.base_id FROM surface_extra_base e JOIN surface s ON s.id = e.surface_id WHERE s.value = ?
+                UNION
+                SELECT b.id FROM base b WHERE b.value = ?
+                UNION
+                SELECT s.base_id FROM variant v
+                JOIN surface_variant sv ON sv.variant_id = v.id
+                JOIN surface s ON sv.surface_id = s.id
+                WHERE v.value = ?
+            ),
+            members AS (
+                SELECT s.base_id AS base_id, s.id AS surface_id, 1 AS own
+                FROM surface s WHERE s.base_id IN (SELECT base_id FROM matches)
+                UNION ALL
+                SELECT e.base_id, e.surface_id, 0
+                FROM surface_extra_base e WHERE e.base_id IN (SELECT base_id FROM matches)
+            )
+            SELECT b.id as base_id,
+                   b.value as base,
+                   s.value as surface,
+                   v.value as variant
+            FROM base b
+            JOIN matches m ON m.base_id = b.id
+            LEFT JOIN members mb ON mb.base_id = b.id
+            LEFT JOIN surface s ON s.id = mb.surface_id
+            LEFT JOIN surface_variant sv ON sv.surface_id = s.id AND mb.own = 1
+            LEFT JOIN variant v ON sv.variant_id = v.id
+        """
+
+        private fun Connection.hasTable(name: String): Boolean =
+            prepareStatement("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").use { stmt ->
+                stmt.setString(1, name)
+                stmt.executeQuery().use { it.next() }
+            }
     }
 
     private data class LookupContext(
         val conn: Connection,
-        val stmt: PreparedStatement
+        val stmt: PreparedStatement,
+        val paramCount: Int
     )
 
     private data class BaseBucket(
