@@ -88,3 +88,6 @@ project(":generator-common").projectDir = file("generator/common")
 project(":reflinks").projectDir = file("generator/reflinks")
 
 includeBuild("SeforimMagicIndexer")
+
+include(":importer-app")
+project(":importer-app").projectDir = file("generator/importer-app")

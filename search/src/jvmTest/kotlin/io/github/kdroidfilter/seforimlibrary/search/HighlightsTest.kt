@@ -15,8 +15,9 @@ class HighlightsTest {
                 categoryFilter: Long?,
                 bookIds: Collection<Long>?,
                 lineIds: Collection<Long>?,
-                baseBookOnly: Boolean
-            ): SearchSession? = null
+                baseBookOnly: Boolean,
+        mode: io.github.kdroidfilter.seforimlibrary.search.SearchMode,
+    ): SearchSession? = null
 
             override fun searchBooksByTitlePrefix(query: String, limit: Int): List<Long> = emptyList()
 
@@ -29,8 +30,9 @@ class HighlightsTest {
                 categoryFilter: Long?,
                 bookIds: Collection<Long>?,
                 lineIds: Collection<Long>?,
-                baseBookOnly: Boolean
-            ): SearchFacets? = null
+                baseBookOnly: Boolean,
+        mode: io.github.kdroidfilter.seforimlibrary.search.SearchMode,
+    ): SearchFacets? = null
 
             override fun highlightRanges(text: String, query: String): List<IntRange> =
                 Regex(query).findAll(text).map { it.range }.toList()

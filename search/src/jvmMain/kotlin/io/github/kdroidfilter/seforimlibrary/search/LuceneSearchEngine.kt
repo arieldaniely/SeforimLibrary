@@ -181,7 +181,8 @@ class LuceneSearchEngine(
     }
 
     private val stdAnalyzer: Analyzer by lazy { analyzer }
-    private val magicDict: MagicDictionaryIndex? by lazy {
+    private val magicDict: MagicDictionaryIndex? get() = magicDictLazy.value
+    private val magicDictLazy = lazy {
         val candidates = listOfNotNull(
             dictionaryPath,
             System.getProperty("magicDict")?.let { Path.of(it) },
@@ -255,9 +256,10 @@ class LuceneSearchEngine(
         categoryFilter: Long?,
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
-        baseBookOnly: Boolean
+        baseBookOnly: Boolean,
+        mode: SearchMode,
     ): SearchSession? {
-        val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly) ?: return null
+        val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode) ?: return null
         return LuceneSearchSession(context.query, context, acquireSearcher())
     }
 
@@ -433,6 +435,7 @@ class LuceneSearchEngine(
 
     override fun close() {
         if (searcherManagerLazy.isInitialized()) runCatching { searcherManager.close() }
+        if (magicDictLazy.isInitialized()) magicDict?.close()
     }
 
     override fun computeFacets(
@@ -442,9 +445,10 @@ class LuceneSearchEngine(
         categoryFilter: Long?,
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
-        baseBookOnly: Boolean
+        baseBookOnly: Boolean,
+        mode: SearchMode,
     ): SearchFacets? {
-        val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
+        val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode)
             ?: return null
 
         return withSearcher { searcher ->
@@ -622,7 +626,8 @@ class LuceneSearchEngine(
         categoryFilter: Long?,
         bookIds: Collection<Long>?,
         lineIds: Collection<Long>?,
-        baseBookOnly: Boolean = false
+        baseBookOnly: Boolean = false,
+        mode: SearchMode = SearchMode.FLEXIBLE,
     ): SearchContext? {
         // Split the raw query into exact phrases (wrapped in ASCII double quotes) and free text.
         // Quoted segments are matched verbatim WITHOUT dictionary expansion (Google-style).
@@ -658,9 +663,10 @@ class LuceneSearchEngine(
 
         // Get all possible expansions for each token (a token can belong to multiple bases)
         // These expansions are used for SEARCH - we keep all of them for better recall
-        magicDict?.prefetch(analyzedStd)
+        if (mode != SearchMode.EXACT) magicDict?.prefetch(analyzedStd)
         val tokenExpansions: Map<String, List<MagicDictionaryIndex.Expansion>> =
             analyzedStd.associateWith { token ->
+                if (mode == SearchMode.EXACT) return@associateWith emptyList()
                 // Get best expansion (prefers matching base, then largest)
                 val expansion = magicDict?.expansionFor(token) ?: return@associateWith emptyList()
                 listOf(expansion)
@@ -672,7 +678,11 @@ class LuceneSearchEngine(
         }
 
         // What the snippets highlight: built on first use (facets need none)
-        val highlightPlan = lazy { buildHighlightPlan(analyzedStd, hasHashem, exactPhrasesNorm) }
+        val highlightPlan = lazy {
+            if (mode == SearchMode.EXACT) {
+                HighlightPlan.build(analyzedStd.map { TokenForms(it) }, exactPhrasesNorm)
+            } else buildHighlightPlan(analyzedStd, hasHashem, exactPhrasesNorm)
+        }
 
         val builder = BooleanQuery.Builder()
         // Mirrors every required clause of builder (the facets need only the hit set)
@@ -709,9 +719,14 @@ class LuceneSearchEngine(
 
         // Free (unquoted) text: dictionary-aware ranking + presence filtering.
         if (norm.isNotBlank()) {
-            val rankedQuery = buildExpandedQuery(norm, near, analyzedStd, tokenExpansions)
-            val mustAllTokensQuery: Query? = buildPresenceFilterForTokens(analyzedStd, near, tokenExpansions)
-            val phraseQuery: Query? = buildSynonymPhraseQuery(analyzedStd, tokenExpansions, near)
+            val rankedQuery = if (mode == SearchMode.EXACT) buildHebrewStdQuery(norm, 3) else
+                buildExpandedQuery(norm, near, analyzedStd, tokenExpansions)
+            val mustAllTokensQuery: Query? = if (mode == SearchMode.EXACT) {
+                BooleanQuery.Builder().apply {
+                    analyzedStd.forEach { add(TermQuery(Term("text", it)), BooleanClause.Occur.MUST) }
+                }.build()
+            } else buildPresenceFilterForTokens(analyzedStd, near, tokenExpansions)
+            val phraseQuery: Query? = if (mode == SearchMode.EXACT) null else buildSynonymPhraseQuery(analyzedStd, tokenExpansions, near)
             if (mustAllTokensQuery != null) {
                 require(mustAllTokensQuery, BooleanClause.Occur.FILTER)
                 logger.d { "[DEBUG] Added mustAllTokensQuery as FILTER" }

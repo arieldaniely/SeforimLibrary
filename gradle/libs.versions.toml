@@ -22,6 +22,8 @@ slf4j = "2.0.17"
 sqlite-jdbc = "3.50.3.0"
 
 [libraries]
+onnxruntime = { module = "com.microsoft.onnxruntime:onnxruntime", version.ref = "onnxruntime" }
+djl-huggingface-tokenizers = { module = "ai.djl.huggingface:tokenizers", version = "0.36.0" }
 
 filekit-core = { module = "io.github.vinceglb:filekit-core", version.ref = "filekitCore" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }

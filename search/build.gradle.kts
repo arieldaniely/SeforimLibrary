@@ -60,6 +60,8 @@ kotlin {
             implementation(libs.sqlDelight.driver.sqlite)
             implementation(libs.kermit)
             implementation(libs.jsoup)
+            implementation(libs.onnxruntime)
+            implementation(libs.djl.huggingface.tokenizers)
         }
 
         jvmTest.dependencies {

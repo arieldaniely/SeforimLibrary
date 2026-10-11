@@ -29,3 +29,10 @@ repomix-output.xml
 **/.codex-app-validation-build/
 
 **/.codex-distribution-validation-build/
+
+# Isolated upstream integration validation outputs
+**/.codex-upstream-*-build/
+**/.codex-*-integration-cache/
+**/.codex-integration-cache/
+.codex-upstream-*-init.gradle
+.codex-*-integration-build.log

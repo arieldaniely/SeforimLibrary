@@ -1,5 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.search
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import java.io.Closeable
 
 /**
@@ -27,6 +29,10 @@ import java.io.Closeable
  * @see SearchPage for the structure of returned pages
  */
 interface SearchSession : Closeable {
+    val effectiveMode: SearchMode? get() = null
+
+    fun highlightUpdates(hits: List<LineHit>): Flow<LineHit> = emptyFlow()
+
     /**
      * Retrieves the next page of search results.
      *

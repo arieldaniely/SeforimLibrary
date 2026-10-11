@@ -137,6 +137,26 @@ class HybridSearchEngine(
     override fun buildSnippet(rawText: String, query: String, near: Int): String =
         lexical.buildSnippet(rawText, query, near)
 
+    override fun highlightRanges(text: String, query: String): List<IntRange> = lexical.highlightRanges(text, query)
+
+    override fun rangeSnippet(text: String, ranges: List<IntRange>): String = lexical.rangeSnippet(text, ranges)
+
+    override fun findInBookCandidates(query: String, bookId: Long): LongArray? = lexical.findInBookCandidates(query, bookId)
+
+    override suspend fun attachSnippets(hits: List<LineHit>, query: String, near: Int): List<LineHit> =
+        lexical.attachSnippets(hits, query, near)
+
+    override suspend fun warmUp() = lexical.warmUp()
+
+    override suspend fun passagesByMeaning(query: String, texts: List<String>): List<String?>? {
+        ensureDense()
+        val emb = embedder ?: return null
+        return withContext(Dispatchers.Default) {
+            val vector = emb.embed(query)
+            texts.map { semanticSpan(emb, vector, it) }
+        }
+    }
+
     override fun buildHighlightTerms(query: String): List<String> =
         lexical.buildHighlightTerms(query)
 
@@ -180,12 +200,7 @@ class HybridSearchEngine(
 
     override suspend fun semanticFind(query: String, bookId: Long, limit: Int): List<Long> {
         if (query.isBlank()) return emptyList()
-        ensureDense()
-        val emb = embedder ?: return emptyList()
-        val vs = vectorSearcher ?: return emptyList()
-        return withContext(Dispatchers.Default) {
-            vs.search(emb.embed(query), limit, baseBookOnly = false, bookIds = listOf(bookId)).map { it.lineId }
-        }
+        return fuse(query, near = 5, bookIds = listOf(bookId), baseOnly = false).hits.take(limit).map { it.lineId }
     }
 
     override fun computeFacets(
@@ -212,7 +227,7 @@ class HybridSearchEngine(
     private suspend fun fuse(query: String, near: Int, bookIds: Collection<Long>?, baseOnly: Boolean): FusedResult = coroutineScope {
         val lexicalTask = async(Dispatchers.IO) {
             lexical.openSession(query, near = near, bookIds = bookIds, baseBookOnly = baseOnly)
-                ?.use { it.nextPage(candidates)?.hits ?: emptyList() } ?: emptyList()
+                ?.use { it.nextPage(candidates, snippets = false)?.hits ?: emptyList() } ?: emptyList()
         }
         ensureDense()   // first call loads the model off-main (covered by the search spinner)
 
@@ -296,15 +311,22 @@ class HybridSearchEngine(
         private var fused: FusedResult? = null
         private var offset = 0
 
-        override suspend fun nextPage(limit: Int): SearchPage? {
+        override suspend fun nextPage(limit: Int, snippets: Boolean): SearchPage? {
             val all = fused ?: fuse(query, near, bookIds, baseOnly).also { fused = it }
             effectiveMode = if (all.queryVector != null) SearchMode.SMART else SearchMode.FLEXIBLE
             if (offset >= all.hits.size) return null
             val end = minOf(offset + limit, all.hits.size)
             // Return the existing snippets immediately; semantic localization is opt-in background work.
-            val slice = all.hits.subList(offset, end).toList()
+            val pageHits = all.hits.subList(offset, end).toList()
+            val slice = if (snippets) lexical.attachSnippets(pageHits, query, near) else pageHits
             offset = end
             return SearchPage(hits = slice, totalHits = all.hits.size.toLong(), isLastPage = offset >= all.hits.size)
+        }
+
+        override suspend fun refinedSnippets(hits: List<LineHit>): Map<Long, String> {
+            val snippets = mutableMapOf<Long, String>()
+            highlightUpdates(hits).collect { snippets[it.lineId] = it.snippet }
+            return snippets
         }
 
         override fun highlightUpdates(hits: List<LineHit>): Flow<LineHit> = flow {

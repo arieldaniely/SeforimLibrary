@@ -86,7 +86,10 @@ interface SearchEngine : Closeable {
      */
     fun buildSnippet(rawText: String, query: String, near: Int): String
 
-    fun buildHighlightTerms(query: String): List<String>
+    fun buildHighlightTerms(query: String): List<String> =
+        query.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+    suspend fun semanticSpan(query: String, text: String): String? = null
 
     /**
      * The words that stand for [query] in [text] (plain, diacritics allowed), as ranges of [text]: the one rule every

@@ -60,7 +60,7 @@ class CompositeSearchEngineTest {
             lineIds: Collection<Long>?, baseBookOnly: Boolean, mode: SearchMode,
         ): SearchSession = object : SearchSession {
             private var offset = 0
-            override suspend fun nextPage(limit: Int): SearchPage? {
+            override suspend fun nextPage(limit: Int, snippets: Boolean): SearchPage? {
                 if (offset >= hits.size) return null
                 val page = hits.drop(offset).take(limit)
                 offset += page.size
