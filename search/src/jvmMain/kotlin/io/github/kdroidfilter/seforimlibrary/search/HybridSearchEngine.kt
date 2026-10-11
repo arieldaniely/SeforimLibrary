@@ -3,6 +3,8 @@ package io.github.kdroidfilter.seforimlibrary.search
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -66,18 +68,34 @@ class HybridSearchEngine(
         denseMutex.withLock {
             if (denseTried && (denseEnabled || !denseConfigured)) return
             withContext(Dispatchers.IO) {
-                val emb = SeforimEmbedder.tryLoad(modelDir)
-                val vs = if (emb != null && Files.isDirectory(indexDir)) {
-                    runCatching { VectorSearcher(indexDir, emb.dim, dbPath, modelDir) }
-                        .onFailure { logger.w(it) { "Invalid semantic index" } }
-                        .getOrNull()
-                } else null
-                if (vs != null) {
-                    embedder = emb; vectorSearcher = vs
-                    logger.i { "dense ready (vector index $indexDir)" }
-                } else {
-                    runCatching { emb?.close() }
-                    logger.i { "dense unavailable -> lexical only" }
+                var emb: SeforimEmbedder? = null
+                var vs: VectorSearcher? = null
+                var published = false
+                try {
+                    coroutineScope {
+                        val modelTask = async { emb = SeforimEmbedder.tryLoad(modelDir) }
+                        val indexTask = async {
+                            if (Files.isDirectory(indexDir)) {
+                                vs = runCatching { VectorSearcher(indexDir, 256, dbPath, modelDir) }
+                                    .onFailure { logger.w(it) { "Invalid semantic index" } }
+                                    .getOrNull()
+                            }
+                        }
+                        modelTask.await()
+                        indexTask.await()
+                    }
+                    if (emb != null && vs != null) {
+                        embedder = emb; vectorSearcher = vs
+                        published = true
+                        logger.i { "dense ready (vector index $indexDir)" }
+                    } else {
+                        logger.i { "dense unavailable -> lexical only" }
+                    }
+                } finally {
+                    if (!published) {
+                        runCatching { vs?.close() }
+                        runCatching { emb?.close() }
+                    }
                 }
             }
             denseTried = true
@@ -191,15 +209,20 @@ class HybridSearchEngine(
     )
 
     /** Lexical page + dense KNN, fused by RRF, resolved to full LineHits. */
-    private suspend fun fuse(query: String, near: Int, bookIds: Collection<Long>?, baseOnly: Boolean): FusedResult {
+    private suspend fun fuse(query: String, near: Int, bookIds: Collection<Long>?, baseOnly: Boolean): FusedResult = coroutineScope {
+        val lexicalTask = async(Dispatchers.IO) {
+            lexical.openSession(query, near = near, bookIds = bookIds, baseBookOnly = baseOnly)
+                ?.use { it.nextPage(candidates)?.hits ?: emptyList() } ?: emptyList()
+        }
         ensureDense()   // first call loads the model off-main (covered by the search spinner)
-        val lexHits = lexical.openSession(query, near = near, bookIds = bookIds, baseBookOnly = baseOnly)
-            ?.use { it.nextPage(candidates)?.hits ?: emptyList() } ?: emptyList()
 
         // Dense failed to load -> lexical-only result (still correct, just no semantic recall).
         val emb = embedder
         val vs = vectorSearcher
-        if (emb == null || vs == null) return FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
+        if (emb == null || vs == null) {
+            val lexHits = lexicalTask.await()
+            return@coroutineScope FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
+        }
 
         // Don't let a dense failure sink the whole search: degrade to lexical and log. This
         // also catches native-image gaps (e.g. a missing Lucene KNN vectors-format SPI entry).
@@ -214,9 +237,11 @@ class HybridSearchEngine(
             throw e
         } catch (e: Exception) {
             logger.w(e) { "dense KNN failed; falling back to lexical-only" }
-            return FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
+            val lexHits = lexicalTask.await()
+            return@coroutineScope FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
         }
 
+        val lexHits = lexicalTask.await()
         val rrf = HashMap<Long, Double>()
         val bookOf = HashMap<Long, Long>()
         lexHits.forEachIndexed { rank, h ->
@@ -232,7 +257,7 @@ class HybridSearchEngine(
             val hit = lexById[lineId] ?: resolveLine(lineId, bookOf[lineId] ?: -1L, query)
             if (hit != null) out += hit.copy(score = score.toFloat())
         }
-        return FusedResult(out, lexById.keys, queryVector)
+        FusedResult(out, lexById.keys, queryVector)
     }
 
     /**

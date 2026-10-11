@@ -8,7 +8,6 @@ import org.apache.lucene.search.BooleanClause
 import org.apache.lucene.search.BooleanQuery
 import org.apache.lucene.search.IndexSearcher
 import org.apache.lucene.search.KnnFloatVectorQuery
-import org.apache.lucene.search.KnnByteVectorQuery
 import org.apache.lucene.search.Query
 import org.apache.lucene.store.FSDirectory
 import org.apache.lucene.store.NIOFSDirectory
@@ -71,14 +70,14 @@ class VectorSearcher(
                     it.getProperty("dimension") == expectedDim.toString() &&
                     it.getProperty("indexed") == it.getProperty("eligible")
             }) { "Inconsistent semantic index shards" }
-            if (dbPath != null) require(sha256(dbPath) == first.getProperty("databaseSha256")) {
+            if (dbPath != null) require(SemanticFileFingerprint.hash(dbPath) == first.getProperty("databaseSha256")) {
                 "Semantic index belongs to a different database"
             }
             if (modelDir != null) {
-                require(sha256(modelDir.resolve("seforim-embed-round2-int8.onnx")) == first.getProperty("modelSha256")) {
+                require(SemanticFileFingerprint.hash(modelDir.resolve("seforim-embed-round2-int8.onnx")) == first.getProperty("modelSha256")) {
                     "Semantic index belongs to a different model"
                 }
-                require(sha256(modelDir.resolve("tokenizer.json")) == first.getProperty("tokenizerSha256")) {
+                require(SemanticFileFingerprint.hash(modelDir.resolve("tokenizer.json")) == first.getProperty("tokenizerSha256")) {
                     "Semantic index belongs to a different tokenizer"
                 }
             }
@@ -119,7 +118,7 @@ class VectorSearcher(
         val byteQuery = if (byteVectors) Int8Vectors.quantize(query) else null
         val filter = filterQuery(baseBookOnly, bookIds)
         return searchers.flatMap { searcher ->
-            val knn: Query = if (byteQuery != null) KnnByteVectorQuery("vec", byteQuery, k, filter)
+            val knn: Query = if (byteQuery != null) CompleteKnnByteVectorQuery("vec", byteQuery, k, filter)
                 else KnnFloatVectorQuery("vec", query, k, filter)
             val top = searcher.search(knn, k)
             // StoredFields is not thread-safe; obtain one for each query.

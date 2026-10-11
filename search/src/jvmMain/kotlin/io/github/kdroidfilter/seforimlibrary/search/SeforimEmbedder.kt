@@ -8,6 +8,7 @@ import co.touchlab.kermit.Logger
 import java.io.Closeable
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CompletableFuture
 
 /**
  * Produces L2-normalized 256-d Round 2 embeddings for Hebrew/Aramaic text on the JVM.
@@ -31,9 +32,32 @@ class SeforimEmbedder private constructor(
 
     val dim: Int = 256
 
-    private val tokenizer: HuggingFaceTokenizer = HuggingFaceTokenizer.newInstance(tokenizerJson)
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val session: OrtSession = openSession(env, onnxModel)
+    // Both native runtimes are expensive on a cold Windows launch. Their independent
+    // library loads can run concurrently instead of adding their startup delays.
+    private val pendingTokenizer = CompletableFuture.supplyAsync {
+        // DJL otherwise probes EC2 metadata synchronously on the first tokenizer load.
+        // This desktop model is entirely local; network telemetry must not delay search.
+        System.setProperty("OPT_OUT_TRACKING", "true")
+        HuggingFaceTokenizer.newInstance(tokenizerJson)
+    }
+    private val env: OrtEnvironment = try {
+        OrtEnvironment.getEnvironment()
+    } catch (failure: Throwable) {
+        pendingTokenizer.thenAccept { it.close() }
+        throw failure
+    }
+    private val session: OrtSession = try {
+        openSession(env, onnxModel)
+    } catch (failure: Throwable) {
+        pendingTokenizer.thenAccept { it.close() }
+        throw failure
+    }
+    private val tokenizer: HuggingFaceTokenizer = try {
+        pendingTokenizer.join()
+    } catch (failure: Throwable) {
+        session.close()
+        throw failure
+    }
 
     // The stock Maven `onnxruntime` artifact is CPU-only on desktop JVM. Hardware EPs only
     // work if a capable native is bundled: CUDA (swap to the onnxruntime_gpu artifact +
