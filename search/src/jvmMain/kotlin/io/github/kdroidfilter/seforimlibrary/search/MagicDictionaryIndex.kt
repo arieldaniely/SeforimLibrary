@@ -20,7 +20,11 @@ import java.util.concurrent.atomic.AtomicInteger
 class MagicDictionaryIndex private constructor(
     private val norm: (String) -> String,
     private val dbFile: Path
-) {
+) : java.io.Closeable {
+    private val lifecycleLock = Any()
+    private var closed = false
+    private val contexts = mutableListOf<LookupContext>()
+
     /**
      * The forms a token expands to. [surface] holds every form (inflections, then the dictionary's variants, then
      * the base) as the ranking uses them; [inflections] only the base's inflected forms and the base itself: the
@@ -39,6 +43,8 @@ class MagicDictionaryIndex private constructor(
      * Prepared statement per thread to avoid re-opening connections on every token.
      */
     private val stmtProvider: ThreadLocal<LookupContext> = ThreadLocal.withInitial {
+        synchronized(lifecycleLock) {
+        check(!closed) { "Dictionary is closed" }
         val conn = DriverManager.getConnection(url).apply {
             autoCommit = false
             // Enforce read-only queries without altering connection flags post-open
@@ -50,7 +56,8 @@ class MagicDictionaryIndex private constructor(
             conn = conn,
             stmt = conn.prepareStatement(sql),
             paramCount = sql.count { it == '?' }
-        )
+        ).also { contexts += it }
+        }
     }
 
     /**
@@ -199,6 +206,26 @@ class MagicDictionaryIndex private constructor(
         }
 
         return expansions
+    }
+
+    override fun close() {
+        synchronized(lifecycleLock) {
+            if (closed) return
+            closed = true
+            contexts.forEach { context ->
+                synchronized(context) {
+                    try {
+                        context.stmt.close()
+                    } finally {
+                        context.conn.close()
+                    }
+                }
+            }
+            contexts.clear()
+            stmtProvider.remove()
+        }
+        synchronized(tokenCache) { tokenCache.clear() }
+        synchronized(baseCache) { baseCache.clear() }
     }
 
     companion object {
