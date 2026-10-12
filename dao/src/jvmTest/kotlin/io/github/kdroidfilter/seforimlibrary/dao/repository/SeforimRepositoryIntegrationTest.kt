@@ -555,24 +555,24 @@ class SeforimRepositoryIntegrationTest {
 
         // From the citing Gemara line, the Verse is a SOURCE.
         val gemaraSources =
-            repository.getSourceSummariesForLines(listOf(gemaraLineId), LinkLoadLevel.FOCUSED)
+            repository.getCommentariesForLineRange(lineIds = listOf(gemaraLineId), connectionTypes = setOf(ConnectionType.SOURCE), offset = 0, limit = 10)
         assertEquals(1, gemaraSources.size)
         assertEquals(verseBookId, gemaraSources.first().link.targetBookId)
         assertEquals(ConnectionType.SOURCE, gemaraSources.first().link.connectionType)
 
         // From the cited Verse line, the Gemara is a MENTION.
         val verseMentions =
-            repository.getMentionSummariesForLines(listOf(verseLineId), LinkLoadLevel.FOCUSED)
+            repository.getCommentariesForLineRange(lineIds = listOf(verseLineId), connectionTypes = setOf(ConnectionType.MENTION), offset = 0, limit = 10)
         assertEquals(1, verseMentions.size)
         assertEquals(gemaraBookId, verseMentions.first().link.targetBookId)
         assertEquals(ConnectionType.MENTION, verseMentions.first().link.connectionType)
 
         // Verse has no sources in Gemara.
-        val verseSources = repository.getSourceSummariesForLines(listOf(verseLineId))
+        val verseSources = repository.getCommentariesForLineRange(lineIds = listOf(verseLineId), connectionTypes = setOf(ConnectionType.SOURCE), offset = 0, limit = 10)
         assertEquals(0, verseSources.size)
 
         // Gemara has no mentions in Verse.
-        val gemaraMentions = repository.getMentionSummariesForLines(listOf(gemaraLineId))
+        val gemaraMentions = repository.getCommentariesForLineRange(lineIds = listOf(gemaraLineId), connectionTypes = setOf(ConnectionType.MENTION), offset = 0, limit = 10)
         assertEquals(0, gemaraMentions.size)
     }
 

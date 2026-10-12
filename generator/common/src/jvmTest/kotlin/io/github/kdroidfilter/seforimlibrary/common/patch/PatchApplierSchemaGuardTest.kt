@@ -27,7 +27,7 @@ class PatchApplierSchemaGuardTest {
     private fun buildSeforimDb(path: Path) {
         Files.deleteIfExists(path)
         JdbcSqliteDriver("jdbc:sqlite:${path.toAbsolutePath()}").use { driver ->
-            SeforimDb.Schema.create(driver)
+            SeforimDb(driver).transaction { SeforimDb.Schema.create(driver) }
         }
         System.gc(); Thread.sleep(50)
     }

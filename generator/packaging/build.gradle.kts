@@ -18,6 +18,7 @@ kotlin {
 
         jvmMain.dependencies {
             implementation(project(":generator-common"))
+            implementation(project(":search"))
             implementation(libs.zstd)
             implementation(libs.commons.compress)
         }
