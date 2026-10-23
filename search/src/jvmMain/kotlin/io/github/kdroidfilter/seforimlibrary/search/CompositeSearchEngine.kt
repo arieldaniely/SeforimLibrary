@@ -17,6 +17,8 @@ class CompositeSearchEngine(
     @Volatile
     private var personalDelegate: SearchEngine? = personal
 
+    suspend fun sharedEmbedder(): SeforimEmbedder? = (base as? HybridSearchEngine)?.sharedEmbedder()
+
     @Synchronized
     fun replacePersonal(engine: SearchEngine?) {
         val previous = personalDelegate
@@ -58,7 +60,8 @@ class CompositeSearchEngine(
 
     override fun rangeSnippet(text: String, ranges: List<IntRange>): String = base.rangeSnippet(text, ranges)
 
-    override fun findInBookCandidates(query: String, bookId: Long): LongArray? = base.findInBookCandidates(query, bookId)
+    override fun findInBookCandidates(query: String, bookId: Long): LongArray? =
+        (if (bookId < 0) personalDelegate else base)?.findInBookCandidates(query, bookId)
 
     override suspend fun passagesByMeaning(query: String, texts: List<String>): List<String?>? =
         base.passagesByMeaning(query, texts)
@@ -82,7 +85,7 @@ class CompositeSearchEngine(
         base.semanticSpan(query, text)
 
     override suspend fun semanticFind(query: String, bookId: Long, limit: Int): List<Long> =
-        base.semanticFind(query, bookId, limit)
+        (if (bookId < 0) personalDelegate else base)?.semanticFind(query, bookId, limit).orEmpty()
 
     override suspend fun denseReady(): Boolean = base.denseReady()
 

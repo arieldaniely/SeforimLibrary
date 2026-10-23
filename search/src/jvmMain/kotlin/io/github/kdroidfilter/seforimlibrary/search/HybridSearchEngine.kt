@@ -42,6 +42,7 @@ class HybridSearchEngine(
     private val dbPath: Path? = null,
     private val rrfK: Int = 60,
     private val candidates: Int = 150,
+    private val sharedEmbedderProvider: (suspend () -> SeforimEmbedder?)? = null,
     private val resolveLine: suspend (lineId: Long, bookId: Long, query: String) -> LineHit?,
 ) : SearchEngine {
 
@@ -62,6 +63,12 @@ class HybridSearchEngine(
 
     val denseEnabled: Boolean get() = embedder != null && vectorSearcher != null
 
+    /** Borrow the base model; callers must never close it. No model is loaded at startup. */
+    suspend fun sharedEmbedder(): SeforimEmbedder? {
+        ensureDense()
+        return embedder
+    }
+
     /** Load the embedder + vector searcher once, on a background thread. Idempotent. */
     private suspend fun ensureDense() {
         if (denseTried && (denseEnabled || !denseConfigured)) return
@@ -73,7 +80,10 @@ class HybridSearchEngine(
                 var published = false
                 try {
                     coroutineScope {
-                        val modelTask = async { emb = SeforimEmbedder.tryLoad(modelDir) }
+                        val modelTask = async {
+                            emb = if (sharedEmbedderProvider != null) sharedEmbedderProvider.invoke()
+                            else SeforimEmbedder.tryLoad(modelDir)
+                        }
                         val indexTask = async {
                             if (Files.isDirectory(indexDir)) {
                                 vs = runCatching { VectorSearcher(indexDir, 256, dbPath, modelDir) }
@@ -94,7 +104,7 @@ class HybridSearchEngine(
                 } finally {
                     if (!published) {
                         runCatching { vs?.close() }
-                        runCatching { emb?.close() }
+                        if (sharedEmbedderProvider == null) runCatching { emb?.close() }
                     }
                 }
             }
@@ -211,7 +221,7 @@ class HybridSearchEngine(
 
     override fun close() {
         runCatching { vectorSearcher?.close() }
-        runCatching { embedder?.close() }
+        if (sharedEmbedderProvider == null) runCatching { embedder?.close() }
         runCatching { lexical.close() }
     }
 

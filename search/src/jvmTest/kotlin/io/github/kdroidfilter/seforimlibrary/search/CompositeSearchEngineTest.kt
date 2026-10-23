@@ -10,6 +10,16 @@ import kotlin.test.assertTrue
 
 class CompositeSearchEngineTest {
     @Test
+    fun routesPersonalBookFindToPersonalIndex() = runTest {
+        val base = FakeEngine(listOf(hit(1, 1f)), SearchFacets(1, emptyMap(), emptyMap()))
+        val personal = FakeEngine(listOf(hit(-1, 1f)), SearchFacets(1, emptyMap(), emptyMap()))
+        val engine = CompositeSearchEngine(base, personal)
+        assertEquals(listOf(-1L), engine.semanticFind("query", -7, 10))
+        assertEquals(listOf(1L), engine.semanticFind("query", 7, 10))
+        assertEquals(listOf(-1L), engine.findInBookCandidates("query", -7)?.toList())
+    }
+
+    @Test
     fun forwardsProgressiveHighlightsFromBothSessionsWithoutChangingPages() = runTest {
         val base = FakeEngine(listOf(hit(1, 10f)), SearchFacets(1, emptyMap(), emptyMap()), highlight = true)
         val personal = FakeEngine(listOf(hit(-1, 8f)), SearchFacets(1, emptyMap(), emptyMap()), highlight = true)
@@ -82,6 +92,8 @@ class CompositeSearchEngineTest {
         override fun searchBooksByTitlePrefix(query: String, limit: Int): List<Long> = hits.map(LineHit::bookId).take(limit)
         override fun buildSnippet(rawText: String, query: String, near: Int): String = rawText
         override fun buildHighlightTerms(query: String): List<String> = emptyList()
+        override suspend fun semanticFind(query: String, bookId: Long, limit: Int): List<Long> = hits.map { it.lineId }
+        override fun findInBookCandidates(query: String, bookId: Long): LongArray = hits.map { it.lineId }.toLongArray()
         override fun computeFacets(
             query: String, near: Int, bookFilter: Long?, categoryFilter: Long?, bookIds: Collection<Long>?,
             lineIds: Collection<Long>?, baseBookOnly: Boolean, mode: SearchMode,
