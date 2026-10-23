@@ -84,6 +84,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends jq sqlite3 unzip zstd
           chmod +x gradlew
 
+      - name: Test metadata and manifest verification
+        run: python3 .github/scripts/test-injection-verification.py
+
       - name: Resolve seed and new release versions
         id: versions
         run: |
@@ -109,22 +112,30 @@ jobs:
       - name: Download seed release database
         run: |
           set -euo pipefail
-          mkdir -p seed-assets seed-extract build
+          mkdir -p seed-assets build
           gh release download '${{ steps.versions.outputs.seed_tag }}' \
             --repo "$SEED_REPOSITORY" \
             --pattern 'seforim_bundle.tar.zst.part*' \
+            --pattern 'seforim_bundle.tar.zst.manifest.json' \
             --pattern 'seforim.db.buildstate' \
             --dir seed-assets
           test -s seed-assets/seforim.db.buildstate
-          cat seed-assets/seforim_bundle.tar.zst.part* > seed-assets/seforim_bundle.tar.zst
-          tar --use-compress-program=unzstd -xf seed-assets/seforim_bundle.tar.zst -C seed-extract
-          test -s seed-extract/seforim.db
-          cp -a seed-extract/. build/
+          python3 .github/scripts/verify-seed-download.py seed-assets > seed-parts.txt
+          # Verified parts are streamed directly: no second archive or full DB copy.
+          while IFS= read -r part; do cat "seed-assets/$part"; done < seed-parts.txt \
+            | tar --use-compress-program=unzstd -xf - -C build
+          test -s build/seforim.db
           cp seed-assets/seforim.db.buildstate build/seforim.db.buildstate
-          rm -rf seed-extract seed-assets
+          cp seed-assets/seforim_bundle.tar.zst.manifest.json seed-manifest.json
+          rm -rf seed-assets
           echo "Restored seed database:"
           ls -lh build/seforim.db build/seforim.db.buildstate
           df -h /
+
+      - name: Snapshot upstream author and book metadata
+        run: |
+          python3 .github/scripts/verify-injection-metadata.py snapshot \
+            build/seforim.db seed-metadata.db
 
       - name: Record seed database counts
         id: seed_counts
@@ -334,6 +345,11 @@ jobs:
           echo "Books to add to Lucene: $NEW_BOOKS"
           echo "Injected counts: books=$AFTER_BOOKS lines=$AFTER_LINES"
 
+      - name: Verify upstream metadata survived injection
+        run: |
+          python3 .github/scripts/verify-injection-metadata.py verify \
+            build/seforim.db seed-metadata.db --report build/metadata-validation.json
+
       - name: Rebuild catalog and append new books to Lucene
         run: |
           set -euo pipefail
@@ -372,6 +388,7 @@ jobs:
           set -euo pipefail
           mkdir -p release-staging
           cp build/package/seforim_bundle.tar.zst.part* release-staging/
+          cp build/package/seforim_bundle.tar.zst.manifest.json release-staging/
           cp build/seforim.db.buildstate release-staging/
           cp build/catalog.pb release-staging/
           if [ -s build/incremental-sefaria-otzaria.zip ]; then
@@ -400,6 +417,7 @@ jobs:
           files: release-staging/*
 
       - name: Refresh release manifest on master
+        if: ${{ inputs.release_type != 'draft' }}
         run: |
           set -euo pipefail
           if LATEST=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null); then
@@ -441,6 +459,8 @@ jobs:
             build/otzaria-new-book-ids.txt
             new-book-ids.txt
             seed-source-counts.json
+            seed-manifest.json
+            build/metadata-validation.json
           if-no-files-found: warn
           retention-days: 30
 
