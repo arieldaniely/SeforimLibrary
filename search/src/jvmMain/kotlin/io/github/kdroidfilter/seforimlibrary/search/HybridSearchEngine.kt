@@ -210,7 +210,7 @@ class HybridSearchEngine(
 
     override suspend fun semanticFind(query: String, bookId: Long, limit: Int): List<Long> {
         if (query.isBlank()) return emptyList()
-        return fuse(query, near = 5, bookIds = listOf(bookId), baseOnly = false).hits.take(limit).map { it.lineId }
+        return fuse(query, near = 5, bookIds = listOf(bookId), baseOnly = false).ranking.take(limit).map { it.lineId }
     }
 
     override fun computeFacets(
@@ -228,7 +228,7 @@ class HybridSearchEngine(
     /** The fused, RRF-ordered hits plus the ids that the lexical path matched (so the dense-only
      *  ones can get a meaning-based snippet in the background). */
     private class FusedResult(
-        val hits: List<LineHit>,
+        val ranking: List<RankedLine>,
         val lexicalIds: Set<Long>,
         val queryVector: FloatArray? = null,
     )
@@ -246,7 +246,7 @@ class HybridSearchEngine(
         val vs = vectorSearcher
         if (emb == null || vs == null) {
             val lexHits = lexicalTask.await()
-            return@coroutineScope FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
+            return@coroutineScope lexicalResult(lexHits)
         }
 
         // Don't let a dense failure sink the whole search: degrade to lexical and log. This
@@ -263,7 +263,7 @@ class HybridSearchEngine(
         } catch (e: Exception) {
             logger.w(e) { "dense KNN failed; falling back to lexical-only" }
             val lexHits = lexicalTask.await()
-            return@coroutineScope FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
+            return@coroutineScope lexicalResult(lexHits)
         }
 
         val lexHits = lexicalTask.await()
@@ -277,13 +277,16 @@ class HybridSearchEngine(
         }
         val lexById = lexHits.associateBy { it.lineId }
         val ordered = rrf.entries.sortedByDescending { it.value }
-        val out = ArrayList<LineHit>(ordered.size)
-        for ((lineId, score) in ordered) {
-            val hit = lexById[lineId] ?: resolveLine(lineId, bookOf[lineId] ?: -1L, query)
-            if (hit != null) out += hit.copy(score = score.toFloat())
+        val ranking = ordered.map { (lineId, score) ->
+            RankedLine(lineId, bookOf.getValue(lineId), score.toFloat(), lexById[lineId])
         }
-        FusedResult(out, lexById.keys, queryVector)
+        FusedResult(ranking, lexById.keys, queryVector)
     }
+
+    private fun lexicalResult(hits: List<LineHit>): FusedResult = FusedResult(
+        hits.map { RankedLine(it.lineId, it.bookId, it.score, it) },
+        hits.map { it.lineId }.toSet(),
+    )
 
     /**
      * Snippet for a dense-only hit: the lexical builder can't anchor (the query words aren't in
@@ -319,18 +322,17 @@ class HybridSearchEngine(
         override var effectiveMode: SearchMode = SearchMode.SMART
             private set
         private var fused: FusedResult? = null
-        private var offset = 0
+        private var pages: RankedSearchResults? = null
 
         override suspend fun nextPage(limit: Int, snippets: Boolean): SearchPage? {
             val all = fused ?: fuse(query, near, bookIds, baseOnly).also { fused = it }
             effectiveMode = if (all.queryVector != null) SearchMode.SMART else SearchMode.FLEXIBLE
-            if (offset >= all.hits.size) return null
-            val end = minOf(offset + limit, all.hits.size)
-            // Return the existing snippets immediately; semantic localization is opt-in background work.
-            val pageHits = all.hits.subList(offset, end).toList()
-            val slice = if (snippets) lexical.attachSnippets(pageHits, query, near) else pageHits
-            offset = end
-            return SearchPage(hits = slice, totalHits = all.hits.size.toLong(), isLastPage = offset >= all.hits.size)
+            val results = pages ?: RankedSearchResults(all.ranking) { lineId, bookId ->
+                resolveLine(lineId, bookId, query)
+            }.also { pages = it }
+            return results.nextPage(limit) { pageHits ->
+                if (snippets) lexical.attachSnippets(pageHits, query, near) else pageHits
+            }
         }
 
         override suspend fun refinedSnippets(hits: List<LineHit>): Map<Long, String> {
@@ -342,10 +344,9 @@ class HybridSearchEngine(
         override fun highlightUpdates(hits: List<LineHit>): Flow<LineHit> = flow {
             val all = fused ?: return@flow
             val queryVector = all.queryVector ?: return@flow
-            val denseIds = all.hits.asSequence().map { it.lineId }.toSet() - all.lexicalIds
             for (hit in hits) {
                 currentCoroutineContext().ensureActive()
-                if (hit.lineId !in denseIds) continue
+                if (hit.lineId in all.lexicalIds) continue
                 val snippet = try {
                     semanticSnippet(queryVector, hit.rawText, near)
                 } catch (e: CancellationException) {
