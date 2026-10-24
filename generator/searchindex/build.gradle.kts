@@ -47,6 +47,8 @@ kotlin {
             implementation(kotlin("test"))
         }
 
+        jvmTest.dependencies { implementation(kotlin("test")) }
+
         jvmMain.dependencies {
             implementation(project(":core"))
             implementation(project(":dao"))
@@ -186,4 +188,38 @@ if (embedVectors) {
         }
         jvmArgs("-Xmx8g", "--enable-native-access=ALL-UNNAMED")
     }
+}
+
+// Append only explicitly listed books to Lucene indexes restored from a release bundle.
+// Usage: ./gradlew :searchindex:appendLuceneIndexDefault
+//          -PseforimDb=/path/seforim.db -PbookIdsFile=/path/new-book-ids.txt
+tasks.register<JavaExec>("appendLuceneIndexDefault") {
+    group = "application"
+    description = "Append selected books to existing Lucene text and lookup indexes."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.searchindex.BuildLuceneIndexKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    val dbPath = (project.findProperty("seforimDb") as String?)
+        ?: System.getenv("SEFORIM_DB")
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    val bookIdsFile = project.findProperty("bookIdsFile") as String?
+    systemProperty("seforimDb", dbPath)
+    systemProperty("inMemoryDb", "false")
+    systemProperty("incrementalIndex", "true")
+    if (bookIdsFile != null) systemProperty("bookIdsFile", bookIdsFile)
+    (project.findProperty("indexThreads") as String?)?.let { systemProperty("indexThreads", it) }
+
+    doFirst {
+        checkNotNull(bookIdsFile) { "-PbookIdsFile is required" }
+    }
+
+    jvmArgs = listOf(
+        "-Xmx$generatorHeap",
+        "-XX:+UseG1GC",
+        "-XX:MaxGCPauseMillis=200",
+        "--enable-native-access=ALL-UNNAMED",
+        "--add-modules=jdk.incubator.vector"
+    )
 }

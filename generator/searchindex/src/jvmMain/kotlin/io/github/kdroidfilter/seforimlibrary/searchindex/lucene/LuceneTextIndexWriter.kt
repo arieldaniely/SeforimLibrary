@@ -16,6 +16,7 @@ import org.apache.lucene.document.StringField
 import org.apache.lucene.document.TextField
 import org.apache.lucene.index.IndexWriter
 import org.apache.lucene.index.IndexWriterConfig
+import org.apache.lucene.index.NoMergePolicy
 import org.apache.lucene.index.VectorSimilarityFunction
 import org.apache.lucene.store.FSDirectory
 import java.nio.file.Path
@@ -40,6 +41,7 @@ class LuceneTextIndexWriter(
     private val vectorProvider: ((Long) -> FloatArray?)? = null,
     // Merge to a single segment on close: one HNSW graph and one term dictionary to search instead of dozens
     private val forceMerge: Boolean = true,
+    append: Boolean = false,
 ) : TextIndexWriter {
     companion object Fields {
         const val FIELD_TYPE = "type"
@@ -75,14 +77,21 @@ class LuceneTextIndexWriter(
         // the bytes (Lucene's quantized formats would keep the raw floats next to them, 4x the size)
         val vectorsFormat = Lucene99HnswVectorsFormat(16, 100, mergeWorkers, mergeExecutor)
         val cfg = IndexWriterConfig(analyzer).apply {
-            openMode = IndexWriterConfig.OpenMode.CREATE
+            openMode = if (append) IndexWriterConfig.OpenMode.APPEND else IndexWriterConfig.OpenMode.CREATE
+            if (append) mergePolicy = NoMergePolicy.INSTANCE
             codec = object : Lucene104Codec() {
                 override fun getKnnVectorsFormatForField(field: String): KnnVectorsFormat = vectorsFormat
             }
             // Fewer, larger flushed segments: every merge of vector segments rebuilds a graph
-            ramBufferSizeMB = 1024.0
+            ramBufferSizeMB = if (append) 128.0 else 1024.0
         }
-        writer = IndexWriter(dir, cfg)
+        writer = try {
+            IndexWriter(dir, cfg)
+        } catch (failure: Throwable) {
+            mergeExecutor.shutdown()
+            dir.close()
+            throw failure
+        }
     }
 
     override fun addLine(
@@ -162,6 +171,10 @@ class LuceneTextIndexWriter(
         writer.addDocument(doc)
     }
 
+    override fun deleteBookById(bookId: Long) {
+        writer.deleteDocuments(IntPoint.newExactQuery(FIELD_BOOK_ID, Math.toIntExact(bookId)))
+    }
+
     override fun deleteLineById(lineId: Long) {
         // line_id is indexed as IntPoint (point field), so target it with an
         // exact-match point query. Deletes every line-document whose
@@ -182,11 +195,12 @@ class LuceneTextIndexWriter(
 
     override fun close() {
         try {
-            if (forceMerge) {
-                writer.forceMerge(1)
-                writer.commit()
+            writer.use {
+                if (forceMerge) {
+                    it.forceMerge(1)
+                    it.commit()
+                }
             }
-            writer.close()
         } finally {
             mergeExecutor.shutdown()
             dir.close()

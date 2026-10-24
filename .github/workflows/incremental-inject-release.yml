@@ -87,6 +87,11 @@ jobs:
       - name: Test metadata and manifest verification
         run: python3 .github/scripts/test-injection-verification.py
 
+      - name: Preflight generator and packaging tasks
+        run: |
+          ./gradlew :searchindex:appendLuceneIndexDefault :catalog:buildCatalog :packaging:packageArtifacts \
+            -PbookIdsFile="$PWD/new-book-ids.txt" -PnoVectors=true --dry-run --no-daemon
+
       - name: Resolve seed and new release versions
         id: versions
         run: |

@@ -20,6 +20,8 @@ import org.apache.lucene.analysis.TokenStream
 import org.apache.lucene.analysis.core.LowerCaseFilter
 import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper
 import org.apache.lucene.analysis.ngram.NGramTokenFilter
+import org.apache.lucene.index.DirectoryReader
+import org.apache.lucene.store.FSDirectory
 import org.jsoup.Jsoup
 import org.jsoup.safety.Safelist
 import java.io.DataInputStream
@@ -60,6 +62,20 @@ fun main() = runBlocking {
     val lookupDir: Path = if (dbPath.endsWith(".db")) Paths.get("$dbPath.lookup.lucene") else Paths.get("$dbPath.lookup")
     runCatching { Files.createDirectories(indexDir) }
     runCatching { Files.createDirectories(lookupDir) }
+
+    val incremental = System.getProperty("incrementalIndex", "false").toBooleanStrict()
+    val includedBookIds = System.getProperty("bookIdsFile")?.let { rawPath ->
+        val path = Paths.get(rawPath)
+        require(Files.isRegularFile(path)) { "Book ID list not found at $path" }
+        Files.readAllLines(path).map(String::trim).filter(String::isNotEmpty).map(String::toLong).toSet()
+    }
+    if (incremental) {
+        require(includedBookIds != null) { "incrementalIndex requires -DbookIdsFile" }
+        // Open both readers before any writer: a damaged seed must never be silently replaced.
+        for (path in listOf(indexDir, lookupDir)) {
+            FSDirectory.open(path).use { directory -> DirectoryReader.open(directory).use { } }
+        }
+    }
 
     // Optional dense embeddings -> SINGLE fused index. -DvectorsBin points to a dir
     // with ids.i64 + vecs.f32 + meta.txt (produced by embed_corpus_bin.py against this
@@ -124,9 +140,14 @@ fun main() = runBlocking {
         )
     )
 
-    LuceneTextIndexWriter(indexDir, analyzer = analyzer, vectorProvider = vectorProvider).use { writer ->
-        LuceneLookupIndexWriter(lookupDir, analyzer = analyzer).use { lookup ->
-            val books = repo.getAllBooks()
+    LuceneTextIndexWriter(
+        indexDir, analyzer = analyzer, vectorProvider = vectorProvider,
+        forceMerge = !incremental, append = incremental,
+    ).use { writer ->
+        LuceneLookupIndexWriter(lookupDir, analyzer = analyzer, append = incremental).use { lookup ->
+            val books = includedBookIds?.sorted()?.map { id ->
+                requireNotNull(repo.getBook(id)) { "Requested book $id does not exist" }
+            } ?: repo.getAllBooks()
             val indexThreads = (System.getProperty("indexThreads") ?: Runtime.getRuntime().availableProcessors().toString()).toInt().coerceAtLeast(1)
             val workerDispatcher = Dispatchers.Default.limitedParallelism(indexThreads)
             val totalBooks = books.size
@@ -151,6 +172,10 @@ fun main() = runBlocking {
                         book.order.toInt()
                     }
                     try {
+                        if (incremental) {
+                            writer.deleteBookById(book.id)
+                            lookup.deleteBookById(book.id)
+                        }
                         // Title terms (stored in text index for future use)
                         writer.addBookTitleTerm(book.id, book.categoryId, book.title, book.title)
                         val titleSan = sanitizeAcronymTerm(book.title)
@@ -240,6 +265,7 @@ fun main() = runBlocking {
             }.awaitAll()
 
             // Authors into lookup: name + aliases, ranked by their number of books
+            if (incremental) lookup.deleteAuthors()
             val authors = repo.getAuthorsForLookup().filter { it.name.isNotBlank() }
             for (author in authors) {
                 val terms = (listOf(author.name) + author.aliases)

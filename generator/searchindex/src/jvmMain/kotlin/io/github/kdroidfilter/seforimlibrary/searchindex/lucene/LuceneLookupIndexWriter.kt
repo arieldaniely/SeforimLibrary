@@ -6,12 +6,18 @@ import org.apache.lucene.analysis.standard.StandardAnalyzer
 import org.apache.lucene.document.*
 import org.apache.lucene.index.IndexWriter
 import org.apache.lucene.index.IndexWriterConfig
+import org.apache.lucene.index.NoMergePolicy
+import org.apache.lucene.index.Term
 import org.apache.lucene.search.Sort
 import org.apache.lucene.search.SortField
 import org.apache.lucene.store.FSDirectory
 import java.nio.file.Path
 
-class LuceneLookupIndexWriter(indexDir: Path, analyzer: Analyzer = StandardAnalyzer()) : LookupIndexWriter {
+class LuceneLookupIndexWriter(
+    indexDir: Path,
+    analyzer: Analyzer = StandardAnalyzer(),
+    append: Boolean = false,
+) : LookupIndexWriter {
     companion object F {
         const val FIELD_TYPE = "type"
         const val TYPE_BOOK = "book"
@@ -36,14 +42,20 @@ class LuceneLookupIndexWriter(indexDir: Path, analyzer: Analyzer = StandardAnaly
 
     init {
         val cfg = IndexWriterConfig(analyzer).apply {
-            openMode = IndexWriterConfig.OpenMode.CREATE
+            openMode = if (append) IndexWriterConfig.OpenMode.APPEND else IndexWriterConfig.OpenMode.CREATE
+            if (append) mergePolicy = NoMergePolicy.INSTANCE
             // Ensure base books receive lower docIDs so they win ties in constant-score lookups
             indexSort = Sort(
                 SortField(FIELD_IS_BASE_BOOK, SortField.Type.INT, true),
                 SortField(FIELD_ORDER_INDEX, SortField.Type.INT)
             )
         }
-        writer = IndexWriter(dir, cfg)
+        writer = try {
+            IndexWriter(dir, cfg)
+        } catch (failure: Throwable) {
+            dir.close()
+            throw failure
+        }
     }
 
     override fun addBook(
@@ -102,11 +114,19 @@ class LuceneLookupIndexWriter(indexDir: Path, analyzer: Analyzer = StandardAnaly
         writer.addDocument(doc)
     }
 
+    fun deleteBookById(bookId: Long) {
+        writer.deleteDocuments(IntPoint.newExactQuery(FIELD_BOOK_ID, Math.toIntExact(bookId)))
+    }
+
+    fun deleteAuthors() {
+        writer.deleteDocuments(Term(FIELD_TYPE, TYPE_AUTHOR))
+    }
+
     override fun commit() {
         writer.commit()
     }
 
     override fun close() {
-        writer.close(); dir.close()
+        try { writer.close() } finally { dir.close() }
     }
 }
