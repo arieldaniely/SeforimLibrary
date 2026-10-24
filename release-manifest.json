@@ -1,31 +1,131 @@
 {
-  "generatedAt": "2026-10-11T21:05:47Z",
+  "generatedAt": "2026-10-11T21:46:40Z",
   "latest": {
-    "assets": [],
-    "name": "v2-20261011170830",
-    "publishedAt": "2026-10-11T19:38:10Z",
-    "tagName": "v2-20261011170830"
+    "assets": [
+      {
+        "apiUrl": "https://api.github.com/repos/arieldaniely/SeforimLibrary/releases/assets/631871781",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-10-11T21:38:26Z",
+        "digest": "sha256:eff678999bf05cbb1958c636085329e39ae3612c640d10a49984536cbde211fc",
+        "downloadCount": 0,
+        "id": "RA_kwDORdnJGs4lqZkl",
+        "label": "",
+        "name": "checksums.sha256",
+        "size": 388,
+        "state": "uploaded",
+        "updatedAt": "2026-10-11T21:38:26Z",
+        "url": "https://github.com/arieldaniely/SeforimLibrary/releases/download/v2-202610120015/checksums.sha256"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/arieldaniely/SeforimLibrary/releases/assets/631871797",
+        "contentType": "application/json",
+        "createdAt": "2026-10-11T21:38:26Z",
+        "digest": "sha256:0999edd0d467db1c7b167e3cbb23261b043db5d95ae3ae6e4a4a9ad60417c4a3",
+        "downloadCount": 0,
+        "id": "RA_kwDORdnJGs4lqZk1",
+        "label": "",
+        "name": "distributions.json",
+        "size": 63920,
+        "state": "uploaded",
+        "updatedAt": "2026-10-11T21:38:27Z",
+        "url": "https://github.com/arieldaniely/SeforimLibrary/releases/download/v2-202610120015/distributions.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/arieldaniely/SeforimLibrary/releases/assets/631871820",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-10-11T21:38:27Z",
+        "digest": "sha256:4a47ae7ff6879dfa37071cd3eac9efcc7c81ea6c29ad47d7ee9a9315571c1db9",
+        "downloadCount": 0,
+        "id": "RA_kwDORdnJGs4lqZlM",
+        "label": "",
+        "name": "seforim_bundle.tar.zst.part01",
+        "size": 1900000000,
+        "state": "uploaded",
+        "updatedAt": "2026-10-11T21:41:29Z",
+        "url": "https://github.com/arieldaniely/SeforimLibrary/releases/download/v2-202610120015/seforim_bundle.tar.zst.part01"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/arieldaniely/SeforimLibrary/releases/assets/631879050",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-10-11T21:41:29Z",
+        "digest": "sha256:83d4eb1a874b00d65e6776d16644a240ee50a8c38e4ee80bc044e0752da3214c",
+        "downloadCount": 0,
+        "id": "RA_kwDORdnJGs4lqbWK",
+        "label": "",
+        "name": "seforim_bundle.tar.zst.part02",
+        "size": 1900000000,
+        "state": "uploaded",
+        "updatedAt": "2026-10-11T21:44:35Z",
+        "url": "https://github.com/arieldaniely/SeforimLibrary/releases/download/v2-202610120015/seforim_bundle.tar.zst.part02"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/arieldaniely/SeforimLibrary/releases/assets/631862084",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-10-11T21:34:09Z",
+        "digest": "sha256:7f3b9f1de3ff17a26db79f864b8311363bca4795a74d734fecf25f799abbc3e1",
+        "downloadCount": 0,
+        "id": "RA_kwDORdnJGs4lqXNE",
+        "label": "",
+        "name": "seforim_bundle.tar.zst.part03",
+        "size": 1900000000,
+        "state": "uploaded",
+        "updatedAt": "2026-10-11T21:37:14Z",
+        "url": "https://github.com/arieldaniely/SeforimLibrary/releases/download/v2-202610120015/seforim_bundle.tar.zst.part03"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/arieldaniely/SeforimLibrary/releases/assets/631869034",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-10-11T21:37:14Z",
+        "digest": "sha256:f4411f8f2be7f25875a9d235dbcfe28eda91d8f50abf33450214cb81ed77a0b3",
+        "downloadCount": 0,
+        "id": "RA_kwDORdnJGs4lqY5q",
+        "label": "",
+        "name": "seforim_bundle.tar.zst.part04",
+        "size": 761500508,
+        "state": "uploaded",
+        "updatedAt": "2026-10-11T21:38:26Z",
+        "url": "https://github.com/arieldaniely/SeforimLibrary/releases/download/v2-202610120015/seforim_bundle.tar.zst.part04"
+      }
+    ],
+    "name": "v2-202610120015 - מסד מלא כולל אינדקס סמנטי מאוחד",
+    "publishedAt": "2026-10-11T21:46:33Z",
+    "tagName": "v2-202610120015"
   },
   "releases": [
     {
-      "name": "v2-20261011170830",
-      "publishedAt": "2026-10-11T19:38:10Z",
-      "tagName": "v2-20261011170830"
+      "name": "v2-20261001115917-full-71a3c53eda1a",
+      "publishedAt": "0001-01-01T00:00:00Z",
+      "tagName": "v2-20261001115917-full-71a3c53eda1a"
     },
     {
-      "name": "v1-20260601094341",
-      "publishedAt": "2026-06-01T11:50:22Z",
-      "tagName": "v1-20260601094341"
+      "name": "v2-20261001115917-full-71a3c53eda1a",
+      "publishedAt": "0001-01-01T00:00:00Z",
+      "tagName": "v2-20261001115917-full-71a3c53eda1a"
     },
     {
-      "name": "20260114122617",
-      "publishedAt": "2026-01-15T05:41:46Z",
-      "tagName": "20260114122617"
+      "name": "v2-20261001115917-full-6998541f9227",
+      "publishedAt": "0001-01-01T00:00:00Z",
+      "tagName": "v2-20261001115917-full-6998541f9227"
     },
     {
-      "name": "20251116085948",
-      "publishedAt": "2025-11-16T09:34:24Z",
-      "tagName": "20251116085948"
+      "name": "v2-202610120015 - מסד מלא כולל אינדקס סמנטי מאוחד",
+      "publishedAt": "2026-10-11T21:46:33Z",
+      "tagName": "v2-202610120015"
+    },
+    {
+      "name": "v2-20261001115917-full",
+      "publishedAt": "2026-10-01T21:32:33Z",
+      "tagName": "v2-20261001115917-full"
+    },
+    {
+      "name": "v2-20261001115917",
+      "publishedAt": "2026-10-01T16:19:39Z",
+      "tagName": "v2-20261001115917"
+    },
+    {
+      "name": "v2-20260814115718",
+      "publishedAt": "2026-09-29T09:00:35Z",
+      "tagName": "v2-20260814115718"
     }
   ]
 }
