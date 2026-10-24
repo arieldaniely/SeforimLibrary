@@ -40,10 +40,22 @@ tasks.register<JavaExec>("buildSemanticIndexFromVectors") {
             providers.gradleProperty("shardIndex").orElse("0").get(),
             providers.gradleProperty("shardCount").orElse("1").get())
     })
-    maxHeapSize = "4g"
+    systemProperty("semanticForceMerge", providers.gradleProperty("semanticForceMerge").orElse("true").get())
+    maxHeapSize = providers.gradleProperty("semanticHeap").orElse("4g").get()
 }
 
 group = "io.github.kdroidfilter.seforimlibrary"
+
+tasks.register<JavaExec>("optimizeSemanticIndex") {
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.search.OptimizeSemanticIndexKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    argumentProviders.add(CommandLineArgumentProvider {
+        listOf(providers.gradleProperty("seforimDb").get(), providers.gradleProperty("semanticModelDir").get(),
+            providers.gradleProperty("semanticIndexDir").get())
+    })
+    maxHeapSize = providers.gradleProperty("semanticHeap").orElse("6g").get()
+}
 
 kotlin {
     jvmToolchain(libs.versions.jvmToolchain.get().toInt())

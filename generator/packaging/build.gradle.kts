@@ -25,6 +25,21 @@ kotlin {
     }
 }
 
+tasks.register<JavaExec>("packageSemanticBundle") {
+    group = "application"
+    description = "Package the verified semantic index and model, without the database"
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.PackageSemanticBundleKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    argumentProviders.add(org.gradle.process.CommandLineArgumentProvider {
+        listOf(providers.gradleProperty("seforimDb").get(), providers.gradleProperty("semanticModelDir").get(),
+            providers.gradleProperty("semanticIndexDir").get(), providers.gradleProperty("semanticBundleOutput").get(),
+            providers.gradleProperty("splitPartBytes").orElse("2040109465").get(),
+            providers.gradleProperty("zstdLevel").orElse("22").get())
+    })
+    maxHeapSize = "2g"
+}
+
 // Write release information to release_info.txt file
 // Usage:
 //   ./gradlew :packaging:writeReleaseInfo

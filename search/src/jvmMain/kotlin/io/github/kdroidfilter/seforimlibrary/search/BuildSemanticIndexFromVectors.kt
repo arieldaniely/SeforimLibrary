@@ -104,7 +104,8 @@ internal fun buildSemanticIndexFromVectors(args: Array<String>) {
                 }
             }
             // One HNSW graph for the whole corpus, rather than a KNN traversal per segment.
-            writer.forceMerge(1)
+            // Kaggle transfers keep segments; the release action performs the expensive merge.
+            if (System.getProperty("semanticForceMerge", "true").toBooleanStrict()) writer.forceMerge(1)
             writer.commit()
         }
     }
