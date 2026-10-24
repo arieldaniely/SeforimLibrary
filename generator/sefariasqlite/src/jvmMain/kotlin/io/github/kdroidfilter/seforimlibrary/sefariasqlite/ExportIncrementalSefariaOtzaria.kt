@@ -402,7 +402,7 @@ private fun loadSeedTitleKeys(seedDb: Path, logger: Logger): Set<String> {
     val url = "jdbc:sqlite:${seedDb.toUri()}?mode=ro"
     return DriverManager.getConnection(url).use { connection ->
         connection.createStatement().use { statement ->
-            statement.executeQuery("SELECT title FROM book").use { rows ->
+            statement.executeQuery("SELECT title FROM book UNION SELECT heRef FROM book WHERE heRef IS NOT NULL").use { rows ->
                 buildSet {
                     while (rows.next()) normalizeTitleKey(rows.getString(1))?.let(::add)
                 }

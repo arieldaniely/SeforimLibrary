@@ -26,6 +26,7 @@ internal class SefariaLinksImporter(
         lineIdToBookId: Map<Long, Long>,
         bookMetaById: Map<Long, BookMeta>,
         headingLineIds: Set<Long> = emptySet(),
+        requiredBookIds: Set<Long>? = null,
         onLinkStored: (Link) -> Unit = {},
     ) = coroutineScope {
         // Pre-register all connection types we'll use so their ids are stable
@@ -52,6 +53,7 @@ internal class SefariaLinksImporter(
                     lineIdToBookId = lineIdToBookId,
                     bookMetaById = bookMetaById,
                     headingLineIds = headingLineIds,
+                    requiredBookIds = requiredBookIds,
                     linkChannel = linkChannel
                 )
             }
@@ -90,6 +92,7 @@ internal class SefariaLinksImporter(
         lineIdToBookId: Map<Long, Long>,
         bookMetaById: Map<Long, BookMeta>,
         headingLineIds: Set<Long>,
+        requiredBookIds: Set<Long>?,
         linkChannel: Channel<Link>
     ) {
         Files.newBufferedReader(file).use { reader ->
@@ -133,6 +136,9 @@ internal class SefariaLinksImporter(
                         if (srcLine in headingLineIds || tgtLine in headingLineIds) continue
                         val srcBookId = lineBookId(srcLine, lineIdToBookId)
                         val tgtBookId = lineBookId(tgtLine, lineIdToBookId)
+                        if (requiredBookIds != null &&
+                            srcBookId !in requiredBookIds && tgtBookId !in requiredBookIds
+                        ) continue
                         // Upgrade blank/none Conection Type to a schema-derived
                         // type when one side explicitly declares the other as
                         // its base text. Without this, ~1.5M legitimate

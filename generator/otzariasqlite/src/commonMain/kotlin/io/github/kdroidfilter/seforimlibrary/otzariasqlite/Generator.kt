@@ -43,9 +43,13 @@ class DatabaseGenerator(
     private val sourceDirectory: Path,
     private val repository: SeforimRepository,
     private val acronymDbPath: String? = null,
+    private val linksDirectory: Path? = null,
+    private val booksDirectory: Path? = null,
     private val filterSourcesForLinks: Boolean = true,
     private val allocator: IdAllocator = InMemoryIdAllocator.load(path = null),
     private val buildVersion: Int = 0,
+    private val onlyMissingBooks: Boolean = false,
+    private val incrementalLinkBookIds: Set<Long>? = null,
     // Accept previous books changing id (logged instead of failing the build).
     private val allowBookIdLoss: Boolean = false,
 ) {
@@ -96,6 +100,12 @@ class DatabaseGenerator(
     // Library root used for relative path normalization
     private lateinit var libraryRoot: Path
 
+    private fun resolveLibraryDirectory(): Path =
+        booksDirectory ?: sourceDirectory.resolve("\u05d0\u05d5\u05e6\u05e8\u05d9\u05d0")
+
+    private fun resolveLinksDirectory(): Path =
+        linksDirectory ?: sourceDirectory.resolve("links")
+
     // Map from library-relative book key (e.g. "תנ"ך/בראשית.txt") to source name (e.g. "sefariaToOtzaria")
     private val manifestSourcesByRel = mutableMapOf<String, String>()
     // Cache of source name -> id from DB
@@ -123,6 +133,15 @@ class DatabaseGenerator(
     // Overall progress across books
     private var totalBooksToProcess: Int = 0
     private var processedBooksCount: Int = 0
+
+    // Populated before any large text file is read. Values are paths relative
+    // to the Otzaria library root, using forward slashes.
+    private val missingBookKeys = mutableSetOf<String>()
+    private val newlyAddedBookIds = linkedSetOf<Long>()
+    private val linkTouchedBookIds = linkedSetOf<Long>()
+
+    /** Returns IDs inserted by the current missing-books append run. */
+    fun getNewlyAddedBookIds(): Set<Long> = newlyAddedBookIds.toSet()
 
     // Normalization helpers for categories/titles
     private fun normalizeHebrewLabel(raw: String): String {
@@ -169,7 +188,8 @@ class DatabaseGenerator(
     private data class CategoryPlacement(
         val id: Long,
         val leafLevel: Int,
-        val normalizedPath: List<String>
+        val normalizedPath: List<String>,
+        val canonicalPath: List<String>,
     )
 
     private suspend fun findExistingCategory(parentId: Long?, title: String): Category? {
@@ -178,19 +198,22 @@ class DatabaseGenerator(
         return candidates.firstOrNull { comparableLabel(it.title) == targetKey }
     }
 
-    private suspend fun ensureCategoryHierarchy(rawTitle: String, parentId: Long?, startLevel: Int): CategoryPlacement {
+    private suspend fun ensureCategoryHierarchy(
+        rawTitle: String,
+        parentId: Long?,
+        startLevel: Int,
+        canonicalParentPath: List<String>,
+    ): CategoryPlacement {
         val normalizedSegments = normalizeCategorySegments(rawTitle)
         var currentParent = parentId
         var currentLevel = startLevel
         var lastId: Long? = null
-        val pathSoFar = StringBuilder()
 
-        for (title in normalizedSegments) {
-            if (pathSoFar.isNotEmpty()) pathSoFar.append('/')
-            pathSoFar.append(title)
+        for ((index, title) in normalizedSegments.withIndex()) {
+            val fullPath = categoryCanonicalPath(canonicalParentPath, normalizedSegments, index)
             val existing = findExistingCategory(currentParent, title)
             val categoryId = existing?.id ?: bindings.upsertCategory(
-                canonicalPath = pathSoFar.toString(),
+                canonicalPath = fullPath.joinToString("/"),
                 parentId = currentParent,
                 title = title,
                 level = currentLevel,
@@ -205,7 +228,8 @@ class DatabaseGenerator(
         return CategoryPlacement(
             id = finalId,
             leafLevel = currentLevel - 1,
-            normalizedPath = normalizedSegments
+            normalizedPath = normalizedSegments,
+            canonicalPath = canonicalParentPath + normalizedSegments,
         )
     }
 
@@ -215,6 +239,65 @@ class DatabaseGenerator(
             "תנך", "תנ\"ך" -> "תנ״ך"
             else -> base
         }
+    }
+
+    private fun sourceTitleKey(source: String, title: String): String =
+        source.trim().lowercase() + "\u0000" + comparableLabel(title)
+
+    private fun isStandaloneBookFile(path: Path): Boolean {
+        if (!Files.isRegularFile(path) || path.extension != "txt") return false
+        val fileName = path.fileName.toString()
+        val title = fileName.substringBeforeLast('.')
+        if (title.startsWith("הערות על ") && !title.startsWith("הערות על חברותא")) return false
+        if (fileName in fileNameBlacklist) return false
+        return getSourceNameFor(path) !in sourceBlacklist
+    }
+
+    private suspend fun initializeMissingBookSelection(libraryPath: Path) {
+        missingBookKeys.clear()
+        if (!onlyMissingBooks) return
+
+        val identities = repository.getAllBookSourceIdentities()
+        val existingIds = identities.mapTo(HashSet<Long>()) { it.first }
+        val existingSourceTitles = identities.mapTo(HashSet<String>()) { (_, title, source) ->
+            sourceTitleKey(source, title)
+        }
+        val existingSefariaTitles = identities.asSequence()
+            .filter { (_, _, source) -> source.contains("sefaria", ignoreCase = true) }
+            .map { (_, title, _) -> comparableLabel(title) }
+            .toHashSet()
+        val sefariaIds = identities.filter { it.third.contains("sefaria", ignoreCase = true) }.mapTo(HashSet()) { it.first }
+        repository.getAllBooksCore().asSequence().filter { it.id in sefariaIds }.forEach { book ->
+            book.heRef?.let { existingSefariaTitles += comparableLabel(it) }
+        }
+
+        Files.walk(libraryPath).use { stream ->
+            stream.filter { isStandaloneBookFile(it) }.forEach { path ->
+                val rawTitle = path.fileName.toString().substringBeforeLast('.')
+                val title = normalizeBookTitle(rawTitle)
+                val source = getSourceNameFor(path)
+                val allocatedId = allocator.peekBookId(source, title)
+                val alreadyExists = sourceTitleKey(source, title) in existingSourceTitles ||
+                    (allocatedId != null && allocatedId in existingIds) ||
+                    comparableLabel(title) in existingSefariaTitles
+                if (!alreadyExists) missingBookKeys += toLibraryRelativeKey(path)
+            }
+        }
+        logger.i {
+            "Incremental Otzaria selection retained ${missingBookKeys.size} missing books " +
+                "without reading their contents"
+        }
+    }
+
+    private fun shouldProcessBook(path: Path): Boolean =
+        !onlyMissingBooks || toLibraryRelativeKey(path) in missingBookKeys
+
+    private fun containsSelectedBook(directory: Path): Boolean {
+        if (!onlyMissingBooks) return true
+        val relative = runCatching { toLibraryRelativeKey(directory).trimEnd('/') }.getOrDefault("")
+        if (relative.isEmpty()) return missingBookKeys.isNotEmpty()
+        val prefix = "$relative/"
+        return missingBookKeys.any { it.startsWith(prefix) }
     }
 
     private fun stripQuotesForLookup(title: String): String {
@@ -318,7 +401,7 @@ class DatabaseGenerator(
                 logger.i { "🚀 Starting to process library directory: $libraryPath" }
                 // Preload all book .txt contents into RAM for faster processing
                 preloadAllBookContents(libraryPath)
-                processDirectory(libraryPath, null, 0, metadata)
+                processDirectory(libraryPath, null, 0, emptyList(), metadata)
 
                 // Process links
                 processLinks()
@@ -375,6 +458,13 @@ class DatabaseGenerator(
                 // Load sources and create entries upfront
                 loadSourcesFromManifest()
 
+                val libraryPath = sourceDirectory.resolve("אוצריא")
+                if (!libraryPath.exists()) {
+                    throw IllegalStateException("The directory אוצריא does not exist in $sourceDirectory")
+                }
+                libraryRoot = libraryPath
+                initializeMissingBookSelection(libraryPath)
+
                 // ─── Phase 2: touched-book detection ────────────────────────
                 // Runs after manifestSourcesByRel is loaded so the BookKey we
                 // emit matches what the importer will record below
@@ -382,7 +472,10 @@ class DatabaseGenerator(
                 val currentSourceHashes: Map<
                     BookKey,
                     io.github.kdroidfilter.seforimlibrary.common.buildstate.BookSourceHash,
-                > = runCatching {
+                > = if (onlyMissingBooks) {
+                    logger.i { "Skipping full-corpus Otzaria source-hash classification during missing-book append" }
+                    emptyMap()
+                } else runCatching {
                     OtzariaSourceHashComputer(
                         sourceNameResolver = ::getSourceNameFor,
                     ).compute(sourceDirectory, buildVersion)
@@ -401,17 +494,13 @@ class DatabaseGenerator(
                 otzariaSourceHashes = currentSourceHashes
 
                 precreateSourceEntries()
-                backfillAcronymsForExistingBooks()
-                val libraryPath = sourceDirectory.resolve("אוצריא")
-                if (!libraryPath.exists()) {
-                    throw IllegalStateException("The directory אוצריא does not exist in $sourceDirectory")
+                if (!onlyMissingBooks) {
+                    backfillAcronymsForExistingBooks()
                 }
-                libraryRoot = libraryPath
 
-                // Before any book id is allocated (priority books included).
-                registerBookAliases(bookIdContinuity)
-
-                totalBooksToProcess = try {
+                totalBooksToProcess = if (onlyMissingBooks) {
+                    missingBookKeys.size
+                } else try {
                     Files.walk(libraryRoot).use { s ->
                         s.filter { Files.isRegularFile(it) && it.extension == "txt" }
                             .filter { !it.fileName.toString().substringBeforeLast('.')
@@ -421,18 +510,24 @@ class DatabaseGenerator(
                 } catch (_: Exception) { 0 }
                 logger.i { "Planned to process approximately $totalBooksToProcess books (phase 1)" }
 
+                if (onlyMissingBooks && missingBookKeys.isEmpty()) {
+                    logger.i { "No currently-allowed Otzaria books are missing; phase 1 has nothing to append" }
+                    return@runInTransaction
+                }
+
+                if (!onlyMissingBooks) registerBookAliases(bookIdContinuity)
                 runCatching { processPriorityBooks(loadMetadata = { metadata }) }
                     .onFailure { e -> logger.w(e) { "Failed processing priority list; continuing with full generation (phase 1)" } }
                 // Preload all book .txt contents into RAM for faster processing
                 preloadAllBookContents(libraryPath)
-                processDirectory(libraryPath, null, 0, metadata)
+                processDirectory(libraryPath, null, 0, emptyList(), metadata)
 
                 // Build category closure after categories insertion
                 logger.i { "Building category_closure table (phase 1)..." }
                 repository.rebuildCategoryClosure()
             }
             recordSourceHashesAtEndOfImport()
-            checkNoLostBookIds(bookIdContinuity)
+            if (!onlyMissingBooks) checkNoLostBookIds(bookIdContinuity)
         } finally {
             runCatching { enableForeignKeys() }
             runCatching { repository.setSynchronousNormal() }
@@ -446,6 +541,10 @@ class DatabaseGenerator(
      */
     suspend fun generateLinksOnly(): Unit = coroutineScope {
         logger.i { "Starting phase 2: links processing..." }
+        if (incrementalLinkBookIds != null && incrementalLinkBookIds.isEmpty()) {
+            logger.i { "No new Otzaria books; skipping incremental link phase" }
+            return@coroutineScope
+        }
         try {
             disableForeignKeys()
             repository.setSynchronousOff()
@@ -464,7 +563,7 @@ class DatabaseGenerator(
     // Prepare caches so that link resolution uses RAM instead of round-trips
     private suspend fun ensureCachesLoaded() {
         if (booksByTitle.isEmpty()) {
-            val allBooks = repository.getAllBooks()
+            val allBooks = repository.getAllBooksCore()
             val filtered = if (filterSourcesForLinks) {
                 allBooks.filter { book ->
                     val src = runCatching { repository.getSourceById(book.sourceId) }.getOrNull()
@@ -546,7 +645,7 @@ class DatabaseGenerator(
                         logger.d { "Skipping preload for blacklisted source '$src': $rel" }
                         return@filter false
                     }
-                    true
+                    shouldProcessBook(p)
                 }
                 .toList()
         }
@@ -685,6 +784,7 @@ class DatabaseGenerator(
         directory: Path,
         parentCategoryId: Long?,
         level: Int,
+        canonicalParentPath: List<String>,
         metadata: Map<String, BookMetadata>
     ) {
         logger.i { "=== Processing directory: ${directory.fileName} with parentCategoryId: $parentCategoryId (level: $level) ===" }
@@ -699,14 +799,30 @@ class DatabaseGenerator(
             for (entry in entries) {
                 when {
                     Files.isDirectory(entry) -> {
+                        if (!containsSelectedBook(entry)) {
+                            logger.d { "Skipping unchanged Otzaria subtree: ${entry.fileName}" }
+                            continue
+                        }
                         logger.d { "Processing subdirectory: ${entry.fileName} with parentId: $parentCategoryId" }
-                        val placement = ensureCategoryHierarchy(entry.fileName.toString(), parentCategoryId, level)
+                        val placement = ensureCategoryHierarchy(
+                            entry.fileName.toString(),
+                            parentCategoryId,
+                            level,
+                            canonicalParentPath,
+                        )
                         val normalizedPath = placement.normalizedPath.joinToString(" / ")
                         logger.i { "✅ Category '${entry.fileName}' normalized to '$normalizedPath' with ID: ${placement.id} (parent: $parentCategoryId)" }
-                        processDirectory(entry, placement.id, placement.leafLevel + 1, metadata)
+                        processDirectory(
+                            entry,
+                            placement.id,
+                            placement.leafLevel + 1,
+                            placement.canonicalPath,
+                            metadata,
+                        )
                     }
 
                     Files.isRegularFile(entry) && entry.extension == "txt" -> {
+                        if (!shouldProcessBook(entry)) continue
                         // Skip if already processed from the priority list
                         val key = toLibraryRelativeKey(entry)
                         if (processedPriorityBookKeys.contains(key)) {
@@ -774,17 +890,36 @@ class DatabaseGenerator(
             return
         }
 
-        // Skip if a book with the same heRef already exists from Sefaria (Sefaria has priority)
-        if (existsFromSefaria(title)) {
-            logger.i { "⏭️ Skipping '$title' - already exists from Sefaria (priority source)" }
-            processedBooksCount += 1
-            val pct = if (totalBooksToProcess > 0) (processedBooksCount * 100 / totalBooksToProcess) else 0
-            logger.i { "Books progress: $processedBooksCount/$totalBooksToProcess (${pct}%)" }
+        if (!shouldProcessBook(path)) {
+            logger.d { "Skipping existing Otzaria book without reading content: $title" }
             return
+        }
+
+        // Skip if a book with the same heRef already exists from Sefaria (Sefaria has priority)
+        val existingBook = repository.getBookByHeRef(title)
+        if (existingBook != null) {
+            val existingSource = repository.getSourceById(existingBook.sourceId)
+            if (existingSource?.name == "Sefaria") {
+                logger.i { "⏭️ Skipping '$title' - already exists from Sefaria (priority source)" }
+                processedBooksCount += 1
+                val pct = if (totalBooksToProcess > 0) (processedBooksCount * 100 / totalBooksToProcess) else 0
+                logger.i { "Books progress: $processedBooksCount/$totalBooksToProcess (${pct}%)" }
+                return
+            }
         }
 
         // Assign a stable ID via IdAllocator so cross-build reproducibility holds.
         val currentBookId = allocator.bookId(srcName, title)
+        if (onlyMissingBooks) {
+            repository.getBook(currentBookId)?.let { existing ->
+                val existingSource = repository.getSourceById(existing.sourceId)?.name ?: "unknown"
+                error(
+                    "Stable book ID collision while appending '$title' (source=$srcName): " +
+                        "allocated ID $currentBookId already belongs to '${existing.title}' " +
+                        "(source=$existingSource). The database and buildStatePath are out of sync."
+                )
+            }
+        }
         logger.d { "Assigning ID $currentBookId to book '$title' (source=$srcName) with categoryId: $categoryId" }
 
         // Pre-resolve author / pubPlace / pubDate IDs through the IdAllocator
@@ -837,6 +972,7 @@ class DatabaseGenerator(
 
         logger.d { "Inserting book '${book.title}' with ID: ${book.id} and categoryId: ${book.categoryId}" }
         val insertedBookId = repository.insertBook(book)
+        if (onlyMissingBooks) newlyAddedBookIds += insertedBookId
 
         // ✅ Important verification: ensure that ID and categoryId are correct
         val insertedBook = repository.getBook(insertedBookId)
@@ -1168,14 +1304,17 @@ class DatabaseGenerator(
                 logger.d { "Priority entry ${idx + 1}/${entries.size}: already processed (dup in list): $key" }
                 continue@outer
             }
+            if (!shouldProcessBook(bookPath)) continue@outer
 
             // Ensure categories exist and get the final parent category id
             var parentId: Long? = null
             var level = 0
+            var canonicalParentPath = emptyList<String>()
             for (cat in categories) {
-                val placement = ensureCategoryHierarchy(cat, parentId, level)
+                val placement = ensureCategoryHierarchy(cat, parentId, level, canonicalParentPath)
                 parentId = placement.id
                 level = placement.leafLevel + 1
+                canonicalParentPath = placement.canonicalPath
             }
 
             if (parentId == null) {
@@ -1341,9 +1480,9 @@ class DatabaseGenerator(
             headingLineIds.addAll(headingIds)
         }
         logger.i { "Heading lines tracked for filtering: ${headingLineIds.size}" }
-        val linksDir = sourceDirectory.resolve("links")
+        val linksDir = resolveLinksDirectory()
         if (!linksDir.exists()) {
-            logger.w { "Links directory not found" }
+            logger.w { "Links directory not found: $linksDir" }
             return
         }
 
@@ -1351,9 +1490,25 @@ class DatabaseGenerator(
         val linksBefore = repository.countLinks()
         logger.d { "Links in database before processing: $linksBefore" }
 
-        logger.i { "Loading all link JSON files into RAM..." }
+        logger.i {
+            if (incrementalLinkBookIds == null) "Loading all link JSON files into RAM..."
+            else "Loading link JSON files for newly added books..."
+        }
         // Preload all links JSON into memory to minimize IO
-        val linkFiles = Files.list(linksDir).use { s -> s.filter { it.extension == "json" }.toList() }
+        val incrementalTitles = incrementalLinkBookIds
+            ?.mapNotNull { booksById[it]?.title }
+            ?.mapTo(HashSet<String>(), ::comparableLabel)
+        val linkFiles = Files.list(linksDir).use { stream ->
+            stream.filter { it.extension == "json" }
+                .filter { file ->
+                    incrementalTitles == null ||
+                        comparableLabel(file.nameWithoutExtension.removeSuffix("_links")) in incrementalTitles
+                }
+                .toList()
+        }
+        if (incrementalTitles != null) {
+            logger.i { "Incremental link selection retained ${linkFiles.size} link files for ${incrementalTitles.size} new books" }
+        }
         val linksByBook = coroutineScope {
             linkFiles.map { file ->
                 async {
@@ -1385,7 +1540,11 @@ class DatabaseGenerator(
         logger.i { "Total of $totalLinks links processed" }
 
         // Update the book_has_links table
-        updateBookHasLinksTable()
+        if (incrementalLinkBookIds == null) {
+            updateBookHasLinksTable()
+        } else {
+            updateBookHasLinksForBooks(linkTouchedBookIds + incrementalLinkBookIds)
+        }
     }
 
     /**
@@ -1406,8 +1565,8 @@ class DatabaseGenerator(
             return 0
         }
 
-        // Skip Otzaria links for books that come from Sefaria (Sefaria links are more accurate)
-        if (sourceBook.id in sefariaBookIds) {
+        // Skip normal Otzaria links for Sefaria books; allow explicitly selected incremental Sefaria ZIP links.
+        if (sourceBook.id in sefariaBookIds && sourceBook.id !in incrementalLinkBookIds.orEmpty()) {
             return 0
         }
 
@@ -1478,13 +1637,18 @@ class DatabaseGenerator(
                         continue
                     }
 
+                    val oriented = orientOtzariaLink(
+                        sourceBook.id, targetBook.id, sourceLineId, targetLineId,
+                        sourceLineIndex, targetLineIndex, linkData.sourceIsDependent,
+                    )
                     val link = Link(
-                        sourceBookId = sourceBook.id,
-                        targetBookId = targetBook.id,
-                        sourceLineId = sourceLineId,
-                        targetLineId = targetLineId,
-                        targetLineIndex = targetLineIndex,
-                        connectionType = ConnectionType.fromString(linkData.connectionType)
+                        sourceBookId = oriented.sourceBookId,
+                        targetBookId = oriented.targetBookId,
+                        sourceLineId = oriented.sourceLineId,
+                        targetLineId = oriented.targetLineId,
+                        targetLineIndex = oriented.targetLineIndex,
+                        connectionType = ConnectionType.fromString(linkData.connectionType),
+                        isDeclaredBase = linkData.sourceIsDependent,
                     )
 
                     logger.d { "Inserting link from book ${sourceBook.id} to book ${targetBook.id}" }
@@ -1517,12 +1681,20 @@ class DatabaseGenerator(
             return 0
         }
 
-        // Skip Otzaria links for books that come from Sefaria (Sefaria links are more accurate)
-        if (sourceBook.id in sefariaBookIds) {
+        // Skip normal Otzaria links for Sefaria books; allow explicitly selected incremental Sefaria ZIP links.
+        if (sourceBook.id in sefariaBookIds && sourceBook.id !in incrementalLinkBookIds.orEmpty()) {
             return 0
         }
 
         var processed = 0
+        val linkBatch = ArrayList<Link>(2_000)
+
+        suspend fun flushLinks() {
+            if (linkBatch.isEmpty()) return
+            repository.insertLinksBatch(linkBatch)
+            linkBatch.clear()
+        }
+
         for ((index, linkData) in links.withIndex()) {
             try {
                 val path = linkData.path_2
@@ -1553,20 +1725,37 @@ class DatabaseGenerator(
                 // Skip links where source or target is a heading line
                 if (sourceLineId in headingLineIds || targetLineId in headingLineIds) continue
 
-                val link = Link(
+                val connectionType = ConnectionType.fromString(linkData.connectionType)
+                val connectionTypeId = bindings.upsertConnectionType(connectionType.name)
+                val oriented = orientOtzariaLink(
                     sourceBookId = sourceBook.id,
                     targetBookId = targetBook.id,
                     sourceLineId = sourceLineId,
                     targetLineId = targetLineId,
+                    sourceLineIndex = sourceLineIndex,
                     targetLineIndex = targetLineIndex,
-                    connectionType = ConnectionType.fromString(linkData.connectionType)
+                    sourceIsDependent = linkData.sourceIsDependent,
                 )
-                repository.insertLink(link)
+                val link = Link(
+                    id = allocator.linkId(oriented.sourceLineId, oriented.targetLineId, connectionTypeId),
+                    sourceBookId = oriented.sourceBookId,
+                    targetBookId = oriented.targetBookId,
+                    sourceLineId = oriented.sourceLineId,
+                    targetLineId = oriented.targetLineId,
+                    targetLineIndex = oriented.targetLineIndex,
+                    connectionType = connectionType,
+                    isDeclaredBase = linkData.sourceIsDependent,
+                )
+                linkBatch += link
+                linkTouchedBookIds += sourceBook.id
+                linkTouchedBookIds += targetBook.id
                 processed++
+                if (linkBatch.size >= 2_000) flushLinks()
             } catch (_: Exception) {
                 // Skip malformed entries but continue
             }
         }
+        flushLinks()
         return processed
     }
 
@@ -1709,6 +1898,41 @@ class DatabaseGenerator(
     }
 
     // Removed: FTS rebuild is obsolete (Lucene index is committed in this run)
+
+    /** Recomputes link flags only for books touched by an incremental append. */
+    private suspend fun updateBookHasLinksForBooks(bookIds: Set<Long>) {
+        if (bookIds.isEmpty()) return
+        logger.i { "Updating link flags for ${bookIds.size} incrementally touched books" }
+
+        suspend fun hasType(bookId: Long, type: String): Boolean =
+            repository.countLinksBySourceBookAndType(bookId, type) > 0 ||
+                repository.countLinksByTargetBookAndType(bookId, type) > 0
+
+        val dependantTypes = listOf(
+            "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH",
+            "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT",
+        )
+        for (bookId in bookIds) {
+            val hasSourceLinks = repository.countLinksBySourceBook(bookId) > 0
+            val hasTargetLinks = repository.countLinksByTargetBook(bookId) > 0
+            var hasSourceConnection = false
+            for (type in dependantTypes) {
+                if (repository.countLinksByTargetBookAndType(bookId, type) > 0) {
+                    hasSourceConnection = true
+                    break
+                }
+            }
+            repository.updateBookHasLinks(bookId, hasSourceLinks, hasTargetLinks)
+            repository.updateBookConnectionFlags(
+                bookId = bookId,
+                hasTargum = hasType(bookId, "TARGUM"),
+                hasReference = hasType(bookId, "REFERENCE"),
+                hasSource = hasSourceConnection,
+                hasCommentary = hasType(bookId, "COMMENTARY"),
+                hasOther = hasType(bookId, "OTHER"),
+            )
+        }
+    }
 
     /**
      * Updates the book_has_links table to indicate which books have source links, target links, or both.
@@ -1855,7 +2079,9 @@ class DatabaseGenerator(
         val path_2: String,
         val line_index_2: Double,
         @SerialName("Conection Type")
-        val connectionType: String = ""
+        val connectionType: String = "",
+        @SerialName("source_is_dependent")
+        val sourceIsDependent: Boolean = false,
     )
 
     /**
@@ -1868,4 +2094,45 @@ class DatabaseGenerator(
         val refs: Map<String, String>
     )
 
+}
+
+internal data class OtzariaLinkOrientation(
+    val sourceBookId: Long,
+    val targetBookId: Long,
+    val sourceLineId: Long,
+    val targetLineId: Long,
+    val targetLineIndex: Int,
+)
+
+internal fun categoryCanonicalPath(
+    canonicalParentPath: List<String>,
+    normalizedSegments: List<String>,
+    segmentIndex: Int,
+): List<String> = canonicalParentPath + normalizedSegments.take(segmentIndex + 1)
+
+/** Converts an Otzaria file edge into the DB's canonical base -> dependant direction. */
+internal fun orientOtzariaLink(
+    sourceBookId: Long,
+    targetBookId: Long,
+    sourceLineId: Long,
+    targetLineId: Long,
+    sourceLineIndex: Int,
+    targetLineIndex: Int,
+    sourceIsDependent: Boolean,
+): OtzariaLinkOrientation = if (sourceIsDependent) {
+    OtzariaLinkOrientation(
+        sourceBookId = targetBookId,
+        targetBookId = sourceBookId,
+        sourceLineId = targetLineId,
+        targetLineId = sourceLineId,
+        targetLineIndex = sourceLineIndex,
+    )
+} else {
+    OtzariaLinkOrientation(
+        sourceBookId = sourceBookId,
+        targetBookId = targetBookId,
+        sourceLineId = sourceLineId,
+        targetLineId = targetLineId,
+        targetLineIndex = targetLineIndex,
+    )
 }

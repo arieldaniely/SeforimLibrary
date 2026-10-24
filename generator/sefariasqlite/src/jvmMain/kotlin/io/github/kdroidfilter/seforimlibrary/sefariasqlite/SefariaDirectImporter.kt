@@ -18,6 +18,7 @@ import io.github.kdroidfilter.seforimlibrary.core.text.HebrewTextUtils
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.exists
@@ -34,6 +35,7 @@ class SefariaDirectImporter(
     private val repository: SeforimRepository,
     private val allocator: IdAllocator = InMemoryIdAllocator.load(path = null),
     private val buildVersion: Int = 0,
+    private val onlyMissingBooks: Boolean = false,
     private val logger: Logger = Logger.withTag("SefariaDirectImporter")
 ) {
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
@@ -44,6 +46,18 @@ class SefariaDirectImporter(
         val dbRoot = findDatabaseExportRoot(exportRoot)
         val jsonDir = dbRoot.resolve("json")
         val schemaDir = dbRoot.resolve("schemas")
+        val existingBookIdentities = if (onlyMissingBooks) {
+            repository.getAllBooksCore().flatMap { book ->
+                listOfNotNull(book.id to book.title, book.heRef?.let { book.id to it })
+            }.also {
+                logger.i { "Loaded ${it.size} existing book titles for incremental filtering" }
+            }
+        } else {
+            emptyList()
+        }
+        val existingTitleKeys = existingBookIdentities.mapNotNullTo(HashSet()) { (_, title) ->
+            normalizeTitleKey(title)
+        }
 
         // ─── Phase 2: touched-book detection ───────────────────────────────────
         // Computes a per-book sha256 of the source artefact and classifies books
@@ -51,8 +65,13 @@ class SefariaDirectImporter(
         // observability; the fast-path that skips unchanged books is Phase 2.5.
         // Source hashes are recorded on the allocator at the END of import() so
         // the snapshot persists them for the next build.
-        val currentSourceHashes = SefariaSourceHashComputer(sourceName).compute(dbRoot, buildVersion)
-        run {
+        val currentSourceHashes = if (onlyMissingBooks) {
+            logger.i { "Skipping full-corpus source hashing during incremental append" }
+            emptyMap()
+        } else {
+            SefariaSourceHashComputer(sourceName).compute(dbRoot, buildVersion)
+        }
+        if (!onlyMissingBooks) {
             val previousHashes = currentSourceHashes.keys
                 .mapNotNull { key -> allocator.previousSourceHash(key)?.let { key to it } }
                 .toMap()
@@ -72,17 +91,14 @@ class SefariaDirectImporter(
         // Without this, books like Tikkunei Zohar render broken ❌ placeholders
         // (issue 392). This scan reads all merged.json once; the embedder uses
         // a disk cache under build/sefaria/image-cache so re-runs skip network.
-        val mergedFiles = java.nio.file.Files.walk(jsonDir).use { stream ->
-            stream.filter {
-                java.nio.file.Files.isRegularFile(it) &&
-                    it.fileName.toString().equals("merged.json", ignoreCase = true)
-            }.toList()
-        }
+        val mergedFiles = bookPayloadReader.findMergedFiles(jsonDir, schemaDir, schemaLookup, existingTitleKeys)
         SefariaImageEmbedder.prefetch(mergedFiles, logger = logger)
 
         // Read and parse files in parallel
         logger.i { "Starting parallel file processing..." }
-        val bookPayloads = bookPayloadReader.readBooksInParallel(jsonDir, schemaDir, schemaLookup)
+        val bookPayloads = filterPayloadsAlreadyInSeed(
+            bookPayloadReader.readBooksInParallel(mergedFiles, schemaDir, schemaLookup), existingTitleKeys,
+        )
         logger.i { "Parsed ${bookPayloads.size} books" }
 
         // Resolve every merged version's license up front: a version missing from
@@ -122,6 +138,10 @@ class SefariaDirectImporter(
         val priorityEntries = loadPriorityList(classLoader, logger)
         val (orderedBookPayloads, missingPriorityEntriesRaw) =
             applyPriorityOrdering(blacklistResult.payloads, priorityEntries)
+        if (onlyMissingBooks && orderedBookPayloads.isEmpty()) {
+            logger.i { "No currently-allowed Sefaria books are missing; nothing to append" }
+            return@coroutineScope
+        }
         val (blacklistedPriorityEntries, missingPriorityEntries) = missingPriorityEntriesRaw.partition {
             normalizePriorityEntry(it) in blacklistResult.skippedNormalizedPaths
         }
@@ -204,7 +224,13 @@ class SefariaDirectImporter(
         val lineIdToBookId = ConcurrentHashMap<Long, Long>()
         val allRefsWithPath = mutableListOf<RefEntry>()
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
+        val importedBookIds = ConcurrentHashMap.newKeySet<Long>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
+        existingBookIdentities.forEach { (bookId, title) ->
+            normalizeTitleKey(title)?.let { normalized ->
+                normalizedTitleToBookId.putIfAbsent(normalized, bookId)
+            }
+        }
         val headingLineIds = ConcurrentHashMap.newKeySet<Long>()
         // Deferred base_text_titles → bookId resolution. We can't resolve at
         // book-insert time because a commentary's base text may not have been
@@ -220,7 +246,7 @@ class SefariaDirectImporter(
         val linksImporter = SefariaLinksImporter(repository, bindings, logger)
 
         // Before any book id is allocated.
-        registerBookAliases(orderedBookPayloads)
+        if (!onlyMissingBooks) registerBookAliases(orderedBookPayloads)
 
         logger.i { "Inserting books and lines..." }
         var processedBooks = 0
@@ -228,6 +254,7 @@ class SefariaDirectImporter(
         for (payload in orderedBookPayloads) {
             val catId = ensureCategoryPath(payload.categoriesHe)
             val bookId = allocator.bookId(sourceName, canonicalHeTitle(payload))
+            importedBookIds += bookId
             val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
             val bookOrder = (bookOrders[payload.enTitle]
                 ?: bookOrders[payload.heTitle]
@@ -243,9 +270,10 @@ class SefariaDirectImporter(
             // would assign a fresh auto-increment id on every build and break the
             // delta producer's secondary-UNIQUE collision pre-check).
             val resolvedAuthors = payload.authors.map { name ->
+                val existingAuthor = if (onlyMissingBooks) repository.getAuthorByName(name) else null
                 val authorId = bindings.upsertAuthor(name)
                 val topic = payload.authorSlugs[name]?.let { authorTopics[it] }
-                if (topic != null && enrichedAuthorIds.add(authorId)) {
+                if (topic != null && existingAuthor == null && enrichedAuthorIds.add(authorId)) {
                     repository.updateAuthorLifeData(
                         authorId = authorId,
                         birthYear = topic.birthYear,
@@ -405,6 +433,85 @@ class SefariaDirectImporter(
 
         logger.i { "Inserted all books and lines" }
 
+        // Incremental imports initially index only the new books. Most Sefaria
+        // link rows connect a new commentary to an older base text, so the old
+        // implementation silently discarded them when the seed-side citation
+        // could not resolve. Load only directly neighbouring seed books and map
+        // their reference indexes back to stable line IDs already in SQLite.
+        if (onlyMissingBooks && allRefsWithPath.isNotEmpty()) {
+            val linksDir = dbRoot.resolve("links")
+            if (linksDir.exists()) {
+                val neighbourSchemas = discoverExternalLinkSchemas(
+                    linksDir = linksDir,
+                    newRefs = allRefsWithPath,
+                    schemaLookup = schemaLookup,
+                    logger = logger,
+                )
+                val neighbourFiles = bookPayloadReader.findMergedFilesForSchemas(
+                    jsonDir = jsonDir,
+                    schemaDir = schemaDir,
+                    schemaLookup = schemaLookup,
+                    wantedSchemas = neighbourSchemas,
+                )
+                val neighbourPayloads = bookPayloadReader.readBooksInParallel(
+                    mergedFiles = neighbourFiles,
+                    schemaDir = schemaDir,
+                    schemaLookup = schemaLookup,
+                )
+                var loadedBooks = 0
+                var loadedRefs = 0
+                for (payload in neighbourPayloads) {
+                    val existingBookId = sequenceOf(payload.heTitle, payload.enTitle)
+                        .mapNotNull(::normalizeTitleKey)
+                        .mapNotNull(normalizedTitleToBookId::get)
+                        .firstOrNull()
+                        ?: payload.titleAliasKeys.asSequence()
+                            .mapNotNull(normalizedTitleToBookId::get)
+                            .firstOrNull()
+                        ?: continue
+
+                    val syntheticPath = "@seed/$existingBookId"
+                    val existingLineIds = repository.getLineIdsByBookId(existingBookId)
+                    payload.refEntries.forEach { ref ->
+                        val zeroBasedIndex = ref.lineIndex - 1
+                        val lineId = existingLineIds[zeroBasedIndex] ?: return@forEach
+                        allRefsWithPath += ref.copy(path = syntheticPath)
+                        lineKeyToId[syntheticPath to zeroBasedIndex] = lineId
+                        lineIdToBookId[lineId] = existingBookId
+                        loadedRefs++
+                    }
+
+                    listOf(payload.heTitle, payload.enTitle).forEach { title ->
+                        normalizeTitleKey(title)?.let { normalized ->
+                            normalizedTitleToBookId.putIfAbsent(normalized, existingBookId)
+                        }
+                    }
+                    payload.titleAliasKeys.forEach { alias ->
+                        normalizedTitleToBookId.putIfAbsent(alias, existingBookId)
+                    }
+
+                    val normalizedPath = normalizedBookPath(payload.categoriesHe, payload.heTitle)
+                    bookMetaById.putIfAbsent(
+                        existingBookId,
+                        BookMeta(
+                            isBaseBook = normalizedPath in baseBookKeys,
+                            categoryLevel = payload.categoriesHe.lastIndex.coerceAtLeast(0),
+                            priorityRank = priorityIndexByPath[normalizedPath],
+                            dependence = payload.dependence,
+                            collectiveTitleEn = payload.collectiveTitleEn,
+                        )
+                    )
+                    if (payload.baseTextTitleKeys.isNotEmpty()) {
+                        pendingBaseTextKeysByBookId.putIfAbsent(existingBookId, payload.baseTextTitleKeys)
+                    }
+                    loadedBooks++
+                }
+                logger.i {
+                    "Loaded incremental link context from $loadedBooks existing books " +
+                        "($loadedRefs addressable lines, ${neighbourSchemas.size} neighbouring schemas)"
+                }
+            }
+        }
         // Apply default mappings
         if (defaultCommentatorsConfig.isNotEmpty()) {
             applyDefaultCommentators(repository, logger, defaultCommentatorsConfig, normalizedTitleToBookId)
@@ -491,6 +598,7 @@ class SefariaDirectImporter(
                 lineIdToBookId = lineIdToBookId,
                 bookMetaById = bookMetaById,
                 headingLineIds = headingLineIds,
+                requiredBookIds = importedBookIds.takeIf { onlyMissingBooks },
                 onLinkStored = { link ->
                     if (link.connectionType == ConnectionType.COMMENTARY) {
                         sparseLinks.forEach { (commentary, links) -> links.record(commentary, link) }
@@ -591,4 +699,72 @@ private fun detectTeamimAndNekudot(lines: List<String>): Pair<Boolean, Boolean> 
         if (hasTeamim && hasNekudot) break
     }
     return hasTeamim to hasNekudot
+}
+/**
+ * Returns schemas for existing books directly linked to the new reference set.
+ * Matching uses the longest schema-title prefix of the external citation.
+ */
+internal fun discoverExternalLinkSchemas(
+    linksDir: Path,
+    newRefs: List<RefEntry>,
+    schemaLookup: Map<String, Path>,
+    logger: Logger = Logger.withTag("SefariaIncrementalLinks"),
+): Set<Path> {
+    if (newRefs.isEmpty() || !linksDir.exists()) return emptySet()
+    val refsByCanonical = newRefs.groupBy { canonicalCitation(it.ref) }
+    val refsByBase = buildMap<String, RefEntry> {
+        newRefs.forEach { ref ->
+            val key = canonicalBase(ref.ref)
+            val current = this[key]
+            if (current == null || ref.lineIndex < current.lineIndex) put(key, ref)
+        }
+    }
+    val schemaByAlias = schemaLookup.entries
+        .mapNotNull { (alias, path) ->
+            canonicalCitation(alias).takeIf(String::isNotBlank)?.let { it to path }
+        }
+        .toMap()
+    val found = linkedSetOf<Path>()
+    var unresolved = 0
+
+    fun schemaForCitation(citation: String): Path? {
+        val words = canonicalCitation(citation).split(' ').filter(String::isNotBlank)
+        for (size in words.size downTo 1) {
+            schemaByAlias[words.take(size).joinToString(" ")]?.let { return it }
+        }
+        return null
+    }
+
+    Files.list(linksDir).use { files ->
+        files.filter { it.fileName.toString().endsWith(".csv", ignoreCase = true) }
+            .forEach { file ->
+                Files.newBufferedReader(file).use { reader ->
+                    val rows = reader.lineSequence().iterator()
+                    if (!rows.hasNext()) return@use
+                    val headers = parseCsvLine(rows.next()).map(::normalizeCitation)
+                    val citation1Index = headers.indexOf("Citation 1")
+                    val citation2Index = headers.indexOf("Citation 2")
+                    if (citation1Index < 0 || citation2Index < 0) return@use
+                    while (rows.hasNext()) {
+                        val row = parseCsvLine(rows.next())
+                        val citation1 = normalizeCitation(row.getOrNull(citation1Index).orEmpty())
+                        val citation2 = normalizeCitation(row.getOrNull(citation2Index).orEmpty())
+                        if (citation1.isBlank() || citation2.isBlank()) continue
+                        val firstIsNew = resolveRefs(citation1, refsByCanonical, refsByBase).isNotEmpty()
+                        val secondIsNew = resolveRefs(citation2, refsByCanonical, refsByBase).isNotEmpty()
+                        val external = when {
+                            firstIsNew && !secondIsNew -> citation2
+                            secondIsNew && !firstIsNew -> citation1
+                            else -> null
+                        } ?: continue
+                        val schema = schemaForCitation(external)
+                        if (schema != null) found.add(schema) else unresolved++
+                    }
+                }
+            }
+    }
+    if (unresolved > 0) {
+        logger.w { "Could not identify schemas for $unresolved external incremental link citations" }
+    }
+    return found
 }
