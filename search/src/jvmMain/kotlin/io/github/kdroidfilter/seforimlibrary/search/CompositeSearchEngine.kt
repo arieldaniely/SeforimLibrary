@@ -66,6 +66,9 @@ class CompositeSearchEngine(
     override suspend fun passagesByMeaning(query: String, texts: List<String>): List<String?>? =
         base.passagesByMeaning(query, texts)
 
+    override suspend fun passagesInBookByMeaning(query: String, texts: List<String>): List<String?>? =
+        base.passagesInBookByMeaning(query, texts)
+
     override suspend fun attachSnippets(hits: List<LineHit>, query: String, near: Int): List<LineHit> {
         val personalIds = hits.filter { it.bookId < 0 }.map { it.lineId }.toSet()
         val enriched = base.attachSnippets(hits.filter { it.lineId !in personalIds }, query, near) +

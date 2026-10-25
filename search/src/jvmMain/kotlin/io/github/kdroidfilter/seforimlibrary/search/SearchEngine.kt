@@ -130,6 +130,11 @@ interface SearchEngine : Closeable {
      */
     suspend fun passagesByMeaning(query: String, texts: List<String>): List<String?>? = null
 
+    /** Find-in-book compares source text with source text, using the passage embedding role. */
+    suspend fun passagesInBookByMeaning(query: String, texts: List<String>): List<String?>? =
+        passagesByMeaning(query, texts)
+
+
     /** A snippet of [text] (snippet text, see [SnippetSources.clean]) laid out around [ranges], bold. */
     fun rangeSnippet(text: String, ranges: List<IntRange>): String = text
 

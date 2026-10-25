@@ -158,11 +158,21 @@ class HybridSearchEngine(
 
     override suspend fun warmUp() = lexical.warmUp()
 
-    override suspend fun passagesByMeaning(query: String, texts: List<String>): List<String?>? {
+    override suspend fun passagesByMeaning(query: String, texts: List<String>): List<String?>? =
+        passagesByMeaning(query, texts, SeforimEmbedder.Role.QUERY)
+
+    override suspend fun passagesInBookByMeaning(query: String, texts: List<String>): List<String?>? =
+        passagesByMeaning(query, texts, SeforimEmbedder.Role.PASSAGE)
+
+    private suspend fun passagesByMeaning(
+        query: String,
+        texts: List<String>,
+        role: SeforimEmbedder.Role,
+    ): List<String?>? {
         ensureDense()
         val emb = embedder ?: return null
         return withContext(Dispatchers.Default) {
-            val vector = emb.embed(query)
+            val vector = emb.embed(query, role)
             texts.map { semanticSpan(emb, vector, it) }
         }
     }
@@ -210,7 +220,9 @@ class HybridSearchEngine(
 
     override suspend fun semanticFind(query: String, bookId: Long, limit: Int): List<Long> {
         if (query.isBlank()) return emptyList()
-        return fuse(query, near = 5, bookIds = listOf(bookId), baseOnly = false).ranking.take(limit).map { it.lineId }
+        return fuse(
+            query, near = 5, bookIds = listOf(bookId), baseOnly = false, role = SeforimEmbedder.Role.PASSAGE,
+        ).ranking.take(limit).map { it.lineId }
     }
 
     override fun computeFacets(
@@ -234,7 +246,13 @@ class HybridSearchEngine(
     )
 
     /** Lexical page + dense KNN, fused by RRF, resolved to full LineHits. */
-    private suspend fun fuse(query: String, near: Int, bookIds: Collection<Long>?, baseOnly: Boolean): FusedResult = coroutineScope {
+    private suspend fun fuse(
+        query: String,
+        near: Int,
+        bookIds: Collection<Long>?,
+        baseOnly: Boolean,
+        role: SeforimEmbedder.Role = SeforimEmbedder.Role.QUERY,
+    ): FusedResult = coroutineScope {
         val lexicalTask = async(Dispatchers.IO) {
             lexical.openSession(query, near = near, bookIds = bookIds, baseBookOnly = baseOnly)
                 ?.use { it.nextPage(candidates, snippets = false)?.hits ?: emptyList() } ?: emptyList()
@@ -254,7 +272,7 @@ class HybridSearchEngine(
         var queryVector: FloatArray? = null
         val denseHits = try {
             withContext(Dispatchers.Default) {
-                val qVec = emb.embed(query)
+                val qVec = emb.embed(query, role)
                 queryVector = qVec
                 vs.search(qVec, candidates, baseOnly, bookIds)
             }
