@@ -65,6 +65,7 @@ kotlin {
     sourceSets {
         jvmMain.dependencies {
             api(project(":core"))
+            api("io.github.arieldaniely:seforim-semantic-open:0.1.0")
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.lucene.core)
@@ -72,8 +73,6 @@ kotlin {
             implementation(libs.sqlDelight.driver.sqlite)
             implementation(libs.kermit)
             implementation(libs.jsoup)
-            implementation(libs.onnxruntime)
-            implementation(libs.djl.huggingface.tokenizers)
         }
 
         jvmTest.dependencies {

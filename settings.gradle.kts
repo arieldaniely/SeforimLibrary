@@ -56,6 +56,7 @@ project(":reflinks").projectDir = file("generator/reflinks")
 project(":importer-app").projectDir = file("generator/importer-app")
 
 includeBuild("SeforimMagicIndexer")
+includeBuild("SeforimSemantic")
 
 // The local embedding tasks in :search work without the private upstream package.
 gradle.extensions.extraProperties["semanticEnabled"] = false

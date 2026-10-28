@@ -4,3 +4,6 @@
 [submodule "SeforimMagicIndexer"]
 	path = SeforimMagicIndexer
 	url = https://github.com/kdroidFilter/SeforimMagicIndexer
+[submodule "SeforimSemantic"]
+	path = SeforimSemantic
+	url = https://github.com/arieldaniely/SeforimSemantic.git
