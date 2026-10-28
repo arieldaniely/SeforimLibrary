@@ -36,3 +36,4 @@ repomix-output.xml
 **/.codex-integration-cache/
 .codex-upstream-*-init.gradle
 .codex-*-integration-build.log
+**/.codex-semantic-build/

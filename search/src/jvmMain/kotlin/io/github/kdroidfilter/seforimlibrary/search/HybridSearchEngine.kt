@@ -43,6 +43,7 @@ class HybridSearchEngine(
     private val rrfK: Int = 60,
     private val candidates: Int = 150,
     private val sharedEmbedderProvider: (suspend () -> SeforimEmbedder?)? = null,
+    private val optionsProvider: () -> SemanticSearchOptions = { SemanticSearchOptions(candidates = candidates) },
     private val resolveLine: suspend (lineId: Long, bookId: Long, query: String) -> LineHit?,
 ) : SearchEngine {
 
@@ -55,6 +56,7 @@ class HybridSearchEngine(
     @Volatile private var vectorSearcher: VectorSearcher? = null
     @Volatile private var denseTried = false
     private val denseMutex = Mutex()
+    private val queryCache = QueryEmbeddingCache()
 
     // Cheap, no-load check: are the model + vector index even present? Decides whether to
     // take the dense path (then load lazily); the actual OrtSession is built in fuse().
@@ -138,7 +140,7 @@ class HybridSearchEngine(
             }
         }
         val effBookIds = bookIds ?: bookFilter?.let { listOf(it) }
-        return HybridSession(query, near, effBookIds, baseBookOnly)
+        return HybridSession(query, near, effBookIds, baseBookOnly, optionsProvider())
     }
 
     override fun searchBooksByTitlePrefix(query: String, limit: Int): List<Long> =
@@ -232,6 +234,7 @@ class HybridSearchEngine(
     ): SearchFacets? = lexical.computeFacets(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode)
 
     override fun close() {
+        queryCache.clear()
         runCatching { vectorSearcher?.close() }
         if (sharedEmbedderProvider == null) runCatching { embedder?.close() }
         runCatching { lexical.close() }
@@ -252,10 +255,11 @@ class HybridSearchEngine(
         bookIds: Collection<Long>?,
         baseOnly: Boolean,
         role: SeforimEmbedder.Role = SeforimEmbedder.Role.QUERY,
+        options: SemanticSearchOptions = optionsProvider(),
     ): FusedResult = coroutineScope {
         val lexicalTask = async(Dispatchers.IO) {
             lexical.openSession(query, near = near, bookIds = bookIds, baseBookOnly = baseOnly)
-                ?.use { it.nextPage(candidates, snippets = false)?.hits ?: emptyList() } ?: emptyList()
+                ?.use { it.nextPage(options.candidates, snippets = false)?.hits ?: emptyList() } ?: emptyList()
         }
         ensureDense()   // first call loads the model off-main (covered by the search spinner)
 
@@ -272,9 +276,10 @@ class HybridSearchEngine(
         var queryVector: FloatArray? = null
         val denseHits = try {
             withContext(Dispatchers.Default) {
-                val qVec = emb.embed(query, role)
+                val qVec = if (options.cacheQueries) queryCache.embed(query, role, emb::embedClean) else emb.embed(query, role)
                 queryVector = qVec
-                vs.search(qVec, candidates, baseOnly, bookIds)
+                val context = currentCoroutineContext()
+                vs.search(qVec, options.copy(maximumResults = null), baseOnly, bookIds, context::ensureActive)
             }
         } catch (e: CancellationException) {
             throw e
@@ -285,18 +290,14 @@ class HybridSearchEngine(
         }
 
         val lexHits = lexicalTask.await()
-        val rrf = HashMap<Long, Double>()
-        val bookOf = HashMap<Long, Long>()
-        lexHits.forEachIndexed { rank, h ->
-            rrf.merge(h.lineId, 1.0 / (rrfK + rank + 1), Double::plus); bookOf[h.lineId] = h.bookId
-        }
-        denseHits.forEachIndexed { rank, h ->
-            rrf.merge(h.lineId, 1.0 / (rrfK + rank + 1), Double::plus); bookOf.putIfAbsent(h.lineId, h.bookId)
-        }
         val lexById = lexHits.associateBy { it.lineId }
-        val ordered = rrf.entries.sortedByDescending { it.value }
-        val ranking = ordered.map { (lineId, score) ->
-            RankedLine(lineId, bookOf.getValue(lineId), score.toFloat(), lexById[lineId])
+        val ranking = SemanticFusion.rank(
+            lexHits.map { DenseHit(it.lineId, it.bookId, it.score) },
+            denseHits,
+            options,
+            rrfK,
+        ).map { hit ->
+            RankedLine(hit.lineId, hit.bookId, hit.score, lexById[hit.lineId])
         }
         FusedResult(ranking, lexById.keys, queryVector)
     }
@@ -336,6 +337,7 @@ class HybridSearchEngine(
         private val near: Int,
         private val bookIds: Collection<Long>?,
         private val baseOnly: Boolean,
+        private val options: SemanticSearchOptions,
     ) : SearchSession {
         override var effectiveMode: SearchMode = SearchMode.SMART
             private set
@@ -343,7 +345,7 @@ class HybridSearchEngine(
         private var pages: RankedSearchResults? = null
 
         override suspend fun nextPage(limit: Int, snippets: Boolean): SearchPage? {
-            val all = fused ?: fuse(query, near, bookIds, baseOnly).also { fused = it }
+            val all = fused ?: fuse(query, near, bookIds, baseOnly, options = options).also { fused = it }
             effectiveMode = if (all.queryVector != null) SearchMode.SMART else SearchMode.FLEXIBLE
             val results = pages ?: RankedSearchResults(all.ranking) { lineId, bookId ->
                 resolveLine(lineId, bookId, query)
