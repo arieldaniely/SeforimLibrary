@@ -45,6 +45,21 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     private val sourceConnectionTypeNames =
         LinkTypeClassification.inverseSourceTypes(LinkLoadLevel.MINIMAL).map { it.name }
     private val mentionConnectionTypeNames = listOf("REFERENCE", "OTHER")
+    private val referencePlaces by lazy {
+        ReferencePlacesReader(database) { ids, query -> queryAllLinkPartitionsForTargetLines(ids, query) }
+    }
+
+    /** Bidirectional cross-references and forward rulings, including personal-library link partitions. */
+    suspend fun getReferencesForLines(
+        lineIds: Collection<Long>,
+        level: LinkLoadLevel = LinkLoadLevel.MINIMAL,
+    ): List<LineReference> = withContext(Dispatchers.IO) { referencePlaces.references(lineIds, level) }
+
+    /** Bases and cited sources of the selected passages, in declared-base and catalog order. */
+    suspend fun getSourcesForLines(
+        lineIds: Collection<Long>,
+        level: LinkLoadLevel = LinkLoadLevel.MINIMAL,
+    ): List<LineReference> = withContext(Dispatchers.IO) { referencePlaces.sources(lineIds, level) }
 
     private fun inverseSourceTypeNames(level: LinkLoadLevel) =
         LinkTypeClassification.inverseSourceTypes(level).map { it.name }

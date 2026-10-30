@@ -125,7 +125,7 @@ class HybridSearchEngine(
         mode: SearchMode,
     ): SearchSession? {
         if (query.isBlank()) return null
-        if (mode != SearchMode.SMART) {
+        if (mode != SearchMode.SMART || SearchQueryParser.parse(query).hasExactPhrases) {
             return lexical.openSession(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly, mode)
         }
         // Dense index supports book / base-book filters only. For category/line filters

@@ -1,0 +1,23 @@
+selectForwardPlaces:
+SELECT ct.name AS connectionType, l.sourceLineId AS fromLineId,
+       tl.id AS lineId, tl.bookId, tl.lineIndex, tl.heRef, tl.content,
+       b.title AS bookTitle, b.categoryId, b.orderIndex AS bookOrderIndex,
+       l.isDeclaredBase, b.isBaseBook
+FROM link l
+JOIN connection_type ct ON l.connectionTypeId = ct.id
+JOIN line tl ON tl.id = l.targetLineId
+JOIN book b ON b.id = l.targetBookId
+WHERE l.sourceLineId IN :lineIds AND ct.name IN :connectionTypes
+ORDER BY b.orderIndex, tl.lineIndex;
+
+selectInversePlaces:
+SELECT ct.name AS connectionType, l.targetLineId AS fromLineId,
+       sl.id AS lineId, sl.bookId, sl.lineIndex, sl.heRef, sl.content,
+       b.title AS bookTitle, b.categoryId, b.orderIndex AS bookOrderIndex,
+       l.isDeclaredBase, b.isBaseBook
+FROM link l
+JOIN connection_type ct ON l.connectionTypeId = ct.id
+JOIN line sl ON sl.id = l.sourceLineId
+JOIN book b ON b.id = l.sourceBookId
+WHERE l.targetLineId IN :lineIds AND ct.name IN :connectionTypes
+ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
