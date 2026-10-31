@@ -72,7 +72,7 @@ class DeltaApplierClientRecoveryTest {
         val seforim = tmp.newFile("seforim.db").toPath()
         Files.delete(seforim)
         JdbcSqliteDriver("jdbc:sqlite:${seforim.toAbsolutePath()}").use { driver ->
-            SeforimDb.Schema.create(driver)
+            SeforimDb(driver).transaction { SeforimDb.Schema.create(driver) }
         }
         val fromHash = DriverManager.getConnection("jdbc:sqlite:${seforim.toAbsolutePath()}").use {
             LogicalContentHasher().compute(it)
@@ -111,7 +111,7 @@ class DeltaApplierClientRecoveryTest {
         val seforim = tmp.newFile("seforim.db").toPath()
         Files.delete(seforim)
         JdbcSqliteDriver("jdbc:sqlite:${seforim.toAbsolutePath()}").use { driver ->
-            SeforimDb.Schema.create(driver)
+            SeforimDb(driver).transaction { SeforimDb.Schema.create(driver) }
         }
         // Stamp the live DB at schema v2; manifest will claim v3.
         DriverManager.getConnection("jdbc:sqlite:${seforim.toAbsolutePath()}").use { conn ->
@@ -149,7 +149,7 @@ class DeltaApplierClientRecoveryTest {
         val seforim = tmp.newFile("seforim.db").toPath()
         Files.delete(seforim)
         JdbcSqliteDriver("jdbc:sqlite:${seforim.toAbsolutePath()}").use { driver ->
-            SeforimDb.Schema.create(driver)
+            SeforimDb(driver).transaction { SeforimDb.Schema.create(driver) }
         }
         val fromHash = DriverManager.getConnection("jdbc:sqlite:${seforim.toAbsolutePath()}").use {
             LogicalContentHasher().compute(it)

@@ -1,7 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.common.patch
 
-import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -25,8 +25,9 @@ class SecondaryUniqueCollisionTest {
     val tmp = TemporaryFolder()
 
     private fun buildDb(path: Path, topicRows: List<Pair<Long, String>>) {
-        val driver = JdbcSqliteDriver("jdbc:sqlite:${path.toAbsolutePath()}")
-        SeforimDb.Schema.create(driver)
+        JdbcSqliteDriver("jdbc:sqlite:${path.toAbsolutePath()}").use { driver ->
+            SeforimDb(driver).transaction { SeforimDb.Schema.create(driver) }
+        }
         DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
             conn.autoCommit = false
             conn.prepareStatement("INSERT INTO topic(id, name) VALUES (?, ?)").use { ps ->
@@ -37,8 +38,6 @@ class SecondaryUniqueCollisionTest {
             }
             conn.commit()
         }
-        driver.close()
-        System.gc(); Thread.sleep(50)
     }
 
     @Test

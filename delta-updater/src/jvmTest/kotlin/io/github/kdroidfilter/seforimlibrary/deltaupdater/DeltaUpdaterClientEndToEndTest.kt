@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.deltaupdater
 
 import com.sun.net.httpserver.HttpServer
+import io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -61,10 +62,8 @@ class DeltaUpdaterClientEndToEndTest {
         }
 
         // Compute manifest hashes from the actual files.
-        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
-            .compute(DriverManager.getConnection("jdbc:sqlite:${targetDb.toAbsolutePath()}"))
-        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
-            .compute(DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}"))
+        val toHash = contentHash(targetDb)
+        val fromHash = contentHash(liveDb)
         val uncompressedSha = sha256(patchDb)
         val uncompressedSize = Files.size(patchDb)
         // The orchestrator only consumes .zst patches now — compress the
@@ -362,10 +361,8 @@ class DeltaUpdaterClientEndToEndTest {
             prevDb = liveDb, newDb = targetDb, outputPath = patchDb,
             fromVersion = 1, toVersion = 2,
         )
-        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
-            .compute(DriverManager.getConnection("jdbc:sqlite:${targetDb.toAbsolutePath()}"))
-        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
-            .compute(DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}"))
+        val toHash = contentHash(targetDb)
+        val fromHash = contentHash(liveDb)
         val uncompressedSha = sha256(patchDb)
         val uncompressedSize = Files.size(patchDb)
         val compressed = io.github.kdroidfilter.seforimlibrary.common.patch.PatchCompressor
@@ -452,6 +449,11 @@ class DeltaUpdaterClientEndToEndTest {
             }
         }
     }
+
+    private fun contentHash(path: Path): String =
+        DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { connection ->
+            LogicalContentHasher().compute(connection)
+        }
 
     private fun sha256(path: Path): String {
         val md = MessageDigest.getInstance("SHA-256")
