@@ -37,3 +37,11 @@ repomix-output.xml
 .codex-upstream-*-init.gradle
 .codex-*-integration-build.log
 **/.codex-semantic-build/
+
+# Temporary verification outputs from the parent application's builds.
+**/.codex-*-build/
+**/.codex-*-cache/
+.codex-*-classpath.txt
+.codex-*.log
+.codex-*-init.gradle
+__pycache__/
